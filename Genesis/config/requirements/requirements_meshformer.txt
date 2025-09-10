@@ -1,0 +1,59 @@
+# MeshFormer Real Implementation Requirements
+# ==========================================
+
+# Core Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# 3D Processing
+trimesh>=4.0.0
+open3d>=0.17.0
+pymeshlab>=2022.2
+scipy>=1.10.0
+
+# Sparse Convolutions (MinkowskiEngine for 3D sparse convolutions)
+MinkowskiEngine>=0.5.4
+
+# Computer Vision & Image Processing
+opencv-python>=4.8.0
+Pillow>=9.5.0
+imageio>=2.31.0
+scikit-image>=0.21.0
+
+# Transformers & Attention
+transformers>=4.30.0
+timm>=0.9.0
+
+# Differentiable Rendering
+nvdiffrast>=0.3.1
+pytorch3d>=0.7.4
+
+# SDF Processing
+skimage>=0.21.0
+marching-cubes>=0.0.6
+
+# Normal Map Processing
+kornia>=0.7.0
+
+# Diffusion Models (for normal map generation)
+diffusers>=0.20.0
+accelerate>=0.21.0
+
+# Utilities
+tqdm>=4.65.0
+wandb>=0.15.0
+omegaconf>=2.3.0
+hydra-core>=1.3.0
+
+# Visualization
+matplotlib>=3.7.0
+plotly>=5.15.0
+
+# Performance
+ninja>=1.11.0
+einops>=0.6.0
+
+# Optional: For real model weights download
+huggingface-hub>=0.16.0
+gdown>=4.7.0

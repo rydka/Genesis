@@ -1,0 +1,316 @@
+{% extends "base.html" %}
+
+{% block title %}Détails de l'Asset - Fantasy RAG{% endblock %}
+
+{% block content %}
+<div id="loadingIndicator" class="loading show text-center py-5">
+    <div class="spinner-border text-primary" role="status">
+        <span class="visually-hidden">Chargement...</span>
+    </div>
+    <p class="mt-3">Chargement des détails de l'asset...</p>
+</div>
+
+<div id="assetDetails" style="display: none;">
+    <!-- Asset Header -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <div class="d-flex justify-content-between align-items-center">
+                <h4 class="mb-0">
+                    <i class="fas fa-cube"></i> <span id="assetName">Asset</span>
+                </h4>
+                <div>
+                    <span id="assetCategory" class="badge badge-weapon">Category</span>
+                    <span id="assetStatus" class="badge bg-success">Status</span>
+                </div>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6">
+                    <h6>Informations Générales</h6>
+                    <table class="table table-sm">
+                        <tr>
+                            <td><strong>ID Asset:</strong></td>
+                            <td id="assetId">-</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Fichier:</strong></td>
+                            <td id="assetFilename">-</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Taille:</strong></td>
+                            <td id="assetFileSize">-</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Format:</strong></td>
+                            <td id="assetFormat">-</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Hash:</strong></td>
+                            <td id="assetHash" class="font-monospace small">-</td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="col-md-6">
+                    <h6>Traitement</h6>
+                    <table class="table table-sm">
+                        <tr>
+                            <td><strong>Étape actuelle:</strong></td>
+                            <td id="assetStage">-</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Créé le:</strong></td>
+                            <td id="assetCreated">-</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Mis à jour:</strong></td>
+                            <td id="assetUpdated">-</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Temps de traitement:</strong></td>
+                            <td id="assetProcessingTime">-</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Tentatives:</strong></td>
+                            <td id="assetAttempts">-</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Tags -->
+            <div id="assetTagsContainer" style="display: none;">
+                <h6>Tags</h6>
+                <div id="assetTags"></div>
+            </div>
+            
+            <!-- Custom Metadata -->
+            <div id="assetMetadataContainer" style="display: none;">
+                <h6>Métadonnées Personnalisées</h6>
+                <div id="assetMetadata"></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Renders Section -->
+    <div id="rendersSection" class="card mb-4" style="display: none;">
+        <div class="card-header">
+            <h5 class="mb-0">
+                <i class="fas fa-images"></i> Vues Rendues (<span id="renderCount">0</span>)
+            </h5>
+        </div>
+        <div class="card-body">
+            <div id="rendersContainer" class="row"></div>
+        </div>
+    </div>
+    
+    <!-- Descriptions Section -->
+    <div id="descriptionsSection" class="card mb-4" style="display: none;">
+        <div class="card-header">
+            <h5 class="mb-0">
+                <i class="fas fa-file-text"></i> Descriptions Générées (<span id="descriptionCount">0</span>)
+            </h5>
+        </div>
+        <div class="card-body">
+            <div id="descriptionsContainer"></div>
+        </div>
+    </div>
+    
+    <!-- Error Section -->
+    <div id="errorSection" class="card border-danger" style="display: none;">
+        <div class="card-header bg-danger text-white">
+            <h5 class="mb-0">
+                <i class="fas fa-exclamation-triangle"></i> Erreur
+            </h5>
+        </div>
+        <div class="card-body">
+            <p id="errorMessage" class="text-danger mb-0"></p>
+        </div>
+    </div>
+</div>
+
+<!-- Error State -->
+<div id="errorState" style="display: none;" class="card border-danger">
+    <div class="card-body text-center py-5">
+        <i class="fas fa-exclamation-triangle fa-3x text-danger mb-3"></i>
+        <h5>Erreur de chargement</h5>
+        <p id="errorStateMessage" class="text-muted"></p>
+        <button class="btn btn-primary" onclick="location.reload()">
+            <i class="fas fa-refresh"></i> Réessayer
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const assetId = window.location.pathname.split('/').pop();
+    loadAssetDetails(assetId);
+});
+
+function loadAssetDetails(assetId) {
+    fetch(`/api/asset/${assetId}`)
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('loadingIndicator').style.display = 'none';
+            
+            if (data.success) {
+                displayAssetDetails(data.asset);
+            } else {
+                showError(data.error);
+            }
+        })
+        .catch(error => {
+            document.getElementById('loadingIndicator').style.display = 'none';
+            console.error('Error:', error);
+            showError('Erreur de connexion');
+        });
+}
+
+function displayAssetDetails(asset) {
+    // Basic info
+    document.getElementById('assetName').textContent = asset.original_filename;
+    document.getElementById('assetId').textContent = asset.asset_id;
+    document.getElementById('assetFilename').textContent = asset.original_filename;
+    document.getElementById('assetFileSize').textContent = formatFileSize(asset.file_size);
+    document.getElementById('assetFormat').textContent = asset.file_format.toUpperCase();
+    document.getElementById('assetHash').textContent = asset.file_hash;
+    document.getElementById('assetStage').textContent = asset.current_stage;
+    document.getElementById('assetCreated').textContent = new Date(asset.created_at * 1000).toLocaleString();
+    document.getElementById('assetUpdated').textContent = new Date(asset.updated_at * 1000).toLocaleString();
+    document.getElementById('assetProcessingTime').textContent = asset.processing_time ? `${asset.processing_time.toFixed(1)}s` : 'N/A';
+    document.getElementById('assetAttempts').textContent = asset.processing_attempts;
+    
+    // Category and status badges
+    const categoryBadge = document.getElementById('assetCategory');
+    categoryBadge.textContent = asset.category;
+    categoryBadge.className = `badge ${getCategoryBadgeClass(asset.category)}`;
+    
+    const statusBadge = document.getElementById('assetStatus');
+    statusBadge.textContent = asset.status;
+    statusBadge.className = `badge ${getStatusBadgeClass(asset.status)}`;
+    
+    // Tags
+    if (asset.tags && asset.tags.length > 0) {
+        document.getElementById('assetTagsContainer').style.display = 'block';
+        document.getElementById('assetTags').innerHTML = asset.tags.map(tag => 
+            `<span class="badge bg-secondary me-1">${tag}</span>`
+        ).join('');
+    }
+    
+    // Custom metadata
+    if (asset.custom_metadata && Object.keys(asset.custom_metadata).length > 0) {
+        document.getElementById('assetMetadataContainer').style.display = 'block';
+        document.getElementById('assetMetadata').innerHTML = Object.entries(asset.custom_metadata).map(([key, value]) => 
+            `<span class="badge bg-info me-1">${key}: ${value}</span>`
+        ).join('');
+    }
+    
+    // Renders
+    if (asset.renders && asset.renders.length > 0) {
+        displayRenders(asset.renders, asset.asset_id);
+    }
+    
+    // Descriptions
+    if (asset.descriptions && asset.descriptions.length > 0) {
+        displayDescriptions(asset.descriptions);
+    }
+    
+    // Error
+    if (asset.last_error) {
+        document.getElementById('errorSection').style.display = 'block';
+        document.getElementById('errorMessage').textContent = asset.last_error;
+    }
+    
+    // Show the details
+    document.getElementById('assetDetails').style.display = 'block';
+}
+
+function displayRenders(renders, assetId) {
+    document.getElementById('rendersSection').style.display = 'block';
+    document.getElementById('renderCount').textContent = renders.length;
+    
+    const container = document.getElementById('rendersContainer');
+    container.innerHTML = renders.map(render => `
+        <div class="col-md-4 col-lg-3 mb-3">
+            <div class="card">
+                <img src="/api/image/${assetId}/${render.view_name}.png" 
+                     class="card-img-top" 
+                     alt="${render.view_name}"
+                     style="height: 200px; object-fit: cover;"
+                     onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZGRkIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPkltYWdlIG5vbiBkaXNwb25pYmxlPC90ZXh0Pjwvc3ZnPg=='">
+                <div class="card-body p-2">
+                    <h6 class="card-title mb-1">${render.view_name}</h6>
+                    <small class="text-muted">
+                        ${render.resolution}<br>
+                        ${formatFileSize(render.file_size)}<br>
+                        ${render.render_time ? `${render.render_time.toFixed(1)}s` : 'N/A'}
+                    </small>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function displayDescriptions(descriptions) {
+    document.getElementById('descriptionsSection').style.display = 'block';
+    document.getElementById('descriptionCount').textContent = descriptions.length;
+    
+    const container = document.getElementById('descriptionsContainer');
+    container.innerHTML = descriptions.map(desc => `
+        <div class="card mb-3">
+            <div class="card-header">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h6 class="mb-0">
+                        <i class="fas fa-language"></i> ${desc.language}
+                    </h6>
+                    <div>
+                        <span class="badge bg-primary">${desc.word_count} mots</span>
+                        <span class="badge bg-info">${desc.model_name}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body">
+                <p class="card-text">${desc.description_text}</p>
+                <div class="row mt-3">
+                    <div class="col-md-6">
+                        <small class="text-muted">
+                            <strong>Généré le:</strong> ${new Date(desc.created_at * 1000).toLocaleString()}<br>
+                            <strong>Temps de génération:</strong> ${desc.generation_time ? `${desc.generation_time.toFixed(1)}s` : 'N/A'}<br>
+                            <strong>Longueur cible:</strong> ${desc.target_length} mots
+                        </small>
+                    </div>
+                    <div class="col-md-6">
+                        ${desc.views_analyzed && desc.views_analyzed.length > 0 ? `
+                            <small class="text-muted">
+                                <strong>Vues analysées:</strong><br>
+                                ${desc.views_analyzed.map(view => `<span class="badge bg-secondary me-1">${view}</span>`).join('')}
+                            </small>
+                        ` : ''}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showError(message) {
+    document.getElementById('errorState').style.display = 'block';
+    document.getElementById('errorStateMessage').textContent = message;
+}
+
+function getStatusBadgeClass(status) {
+    const classes = {
+        'discovered': 'bg-secondary',
+        'rendering': 'bg-warning',
+        'rendered': 'bg-info',
+        'describing': 'bg-primary',
+        'described': 'bg-success',
+        'indexed': 'bg-success',
+        'failed': 'bg-danger'
+    };
+    return classes[status] || 'bg-secondary';
+}
+</script>
+{% endblock %}
