@@ -1,7 +1,0 @@
--r base.txt
-
-# Production
-gunicorn>=21.2.0
-redis>=4.6.0
-celery>=5.3.0
-prometheus-client>=0.17.0

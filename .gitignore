@@ -113,6 +113,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+fantasy_rag_env/
 env/
 venv/
 ENV/
@@ -209,3 +210,6 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Claude Code (réglages personnels ; .claude/settings.json reste partagé)
+.claude/settings.local.json

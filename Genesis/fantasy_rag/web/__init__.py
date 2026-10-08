@@ -1,1 +1,0 @@
-# Fantasy RAG Web Interface
