@@ -5,6 +5,9 @@
 data/
 ressources/
 
+# Third-party repos (Hunyuan3D, etc.)
+third_party/
+
 # Cache Python
 __pycache__/
 *.py[cod]

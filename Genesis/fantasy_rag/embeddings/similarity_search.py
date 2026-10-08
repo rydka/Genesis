@@ -1,18 +1,8 @@
-#!/usr/bin/env python3
-"""
-Similarity Search Engine for Fantasy Assets
-
-This module implements semantic search using ChromaDB for vector storage
-and similarity matching of fantasy asset descriptions.
-"""
-
 import logging
-import numpy as np
-from typing import List, Dict, Optional, Union, Tuple, Any
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-import time
-import uuid
+from typing import Any, Dict, List, Optional
 
 try:
     import chromadb
@@ -21,367 +11,230 @@ try:
 except ImportError:
     CHROMADB_AVAILABLE = False
 
-from .text_embedder import TextEmbedder, EmbeddingConfig
+from .clip_embedder import CLIPEmbedder, CLIPConfig
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class SearchQuery:
-    """Search query configuration"""
     text: str
-    language: str = "auto"
     category_filter: Optional[str] = None
     max_results: int = 10
     min_similarity: float = 0.0
     metadata_filters: Dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass
 class SearchResult:
-    """Single search result"""
     asset_id: str
     description: str
     similarity_score: float
     metadata: Dict[str, Any]
     distance: float
 
+
 @dataclass
 class SearchResponse:
-    """Complete search response"""
     query: str
     results: List[SearchResult]
     total_found: int
     processing_time: float
     search_metadata: Dict[str, Any] = field(default_factory=dict)
 
+
 class SimilaritySearchEngine:
-    """
-    Semantic search engine using ChromaDB and SentenceTransformers
-    """
-    
-    def __init__(self, 
+
+    def __init__(self,
                  db_path: str = "ressources/data/chroma_db",
-                 collection_name: str = "fantasy_assets",
-                 embedding_config: EmbeddingConfig = None):
-        """
-        Initialize search engine
-        
-        Args:
-            db_path: Path to ChromaDB database
-            collection_name: Name of the collection
-            embedding_config: Configuration for text embedder
-        """
+                 collection_name: str = "clip_asset_embeddings",
+                 clip_config: Optional[CLIPConfig] = None):
         self.db_path = Path(db_path)
         self.collection_name = collection_name
-        self.embedding_config = embedding_config or EmbeddingConfig()
-        
+        self.clip_config = clip_config or CLIPConfig()
+
         self.client = None
         self.collection = None
-        self.embedder = None
+        self.embedder: Optional[CLIPEmbedder] = None
         self.initialized = False
-        
-        logger.info(f"SimilaritySearchEngine initialized:")
-        logger.info(f"  Database: {self.db_path}")
-        logger.info(f"  Collection: {self.collection_name}")
-    
+
     def initialize(self) -> bool:
-        """Initialize ChromaDB and embedder"""
-        
         if not CHROMADB_AVAILABLE:
-            logger.error("ChromaDB not available. Install with: pip install chromadb")
+            logger.error("ChromaDB not available")
             return False
-        
+
         try:
-            # Create database directory
             self.db_path.mkdir(parents=True, exist_ok=True)
-            
-            # Initialize ChromaDB client
-            logger.info("Initializing ChromaDB client...")
+
             self.client = chromadb.PersistentClient(
                 path=str(self.db_path),
                 settings=Settings(
                     anonymized_telemetry=False,
-                    allow_reset=True
-                )
+                    allow_reset=True,
+                ),
             )
-            
-            # Initialize text embedder
-            logger.info("Initializing text embedder...")
-            self.embedder = TextEmbedder(self.embedding_config)
-            
-            # Get or create collection
-            try:
-                self.collection = self.client.get_collection(
-                    name=self.collection_name
-                )
-                logger.info(f"✅ Loaded existing collection: {self.collection_name}")
-                logger.info(f"   Documents: {self.collection.count()}")
-            except:
-                # Create new collection
-                self.collection = self.client.create_collection(
-                    name=self.collection_name,
-                    metadata={"description": "Fantasy asset descriptions with multilingual support"}
-                )
-                logger.info(f"✅ Created new collection: {self.collection_name}")
-            
+
+            self.embedder = CLIPEmbedder(self.clip_config)
+
+            self.collection = self.client.get_or_create_collection(
+                name=self.collection_name,
+                metadata={
+                    "hnsw:space": "cosine",
+                    "description": "CLIP embeddings for fantasy 3D assets",
+                },
+            )
+            logger.info("Search engine initialized — collection '%s' (%d documents)",
+                        self.collection_name, self.collection.count())
+
             self.initialized = True
             return True
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize search engine: {str(e)}")
+
+        except Exception:
+            logger.exception("Failed to initialize search engine")
             return False
-    
-    def add_descriptions(self, 
-                        descriptions: Dict[str, str],
-                        metadata: Dict[str, Dict[str, Any]] = None) -> bool:
-        """
-        Add descriptions to the search index
-        
-        Args:
-            descriptions: Dictionary mapping asset IDs to descriptions
-            metadata: Optional metadata for each asset
-            
-        Returns:
-            True if successful
-        """
+
+    def index_asset(self, asset_id: str, view_paths: Dict[str, Path],
+                    metadata: Optional[Dict[str, Any]] = None) -> bool:
         if not self.initialized and not self.initialize():
             return False
-        
-        logger.info(f"Adding {len(descriptions)} descriptions to search index")
-        start_time = time.time()
-        
+
+        start = time.time()
         try:
-            # Generate embeddings
-            embedding_results = self.embedder.embed_descriptions(descriptions)
-            
-            # Prepare data for ChromaDB
-            ids = []
-            embeddings = []
-            documents = []
-            metadatas = []
-            
-            for asset_id, description in descriptions.items():
-                # Generate unique ID for ChromaDB
-                doc_id = f"{asset_id}_{uuid.uuid4().hex[:8]}"
-                ids.append(doc_id)
-                
-                # Get embedding
-                embedding_result = embedding_results[asset_id]
-                embeddings.append(embedding_result.embeddings[0].tolist())
-                
-                # Store description
-                documents.append(description)
-                
-                # Prepare metadata
-                doc_metadata = {
-                    "asset_id": asset_id,
-                    "description_length": len(description),
-                    "word_count": len(description.split()),
-                    "embedding_model": embedding_result.model_name,
-                    "indexed_at": time.time()
-                }
-                
-                # Add custom metadata if provided
-                if metadata and asset_id in metadata:
-                    doc_metadata.update(metadata[asset_id])
-                
-                metadatas.append(doc_metadata)
-            
-            # Add to ChromaDB
-            self.collection.add(
-                ids=ids,
-                embeddings=embeddings,
-                documents=documents,
-                metadatas=metadatas
+            composite = self.embedder.embed_asset_views(view_paths)
+
+            doc_metadata = {
+                "asset_id": asset_id,
+                "views_count": len(view_paths),
+                "views_used": ",".join(sorted(view_paths.keys())),
+                "embedding_model": self.clip_config.model_name,
+                "indexed_at": time.time(),
+            }
+            if metadata:
+                for k, v in metadata.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        doc_metadata[k] = v
+
+            self.collection.upsert(
+                ids=[asset_id],
+                embeddings=[composite.tolist()],
+                documents=[asset_id],
+                metadatas=[doc_metadata],
             )
-            
-            processing_time = time.time() - start_time
-            
-            logger.info(f"✅ Added {len(descriptions)} descriptions in {processing_time:.1f}s")
-            logger.info(f"   Total documents in collection: {self.collection.count()}")
-            
+
+            elapsed = time.time() - start
+            logger.info("Indexed asset '%s' in %.2fs", asset_id, elapsed)
             return True
-            
-        except Exception as e:
-            logger.error(f"Error adding descriptions: {str(e)}")
+
+        except Exception:
+            logger.exception("Failed to index asset '%s'", asset_id)
             return False
-    
+
     def search(self, query: SearchQuery) -> SearchResponse:
-        """
-        Search for similar descriptions
-        
-        Args:
-            query: Search query configuration
-            
-        Returns:
-            SearchResponse with results
-        """
         if not self.initialized and not self.initialize():
             raise RuntimeError("Search engine not initialized")
-        
-        logger.info(f"Searching for: '{query.text[:50]}...'")
-        start_time = time.time()
-        
+
+        start = time.time()
         try:
-            # Generate query embedding
-            query_embedding = self.embedder.embed_texts([query.text])
+            query_emb = self.embedder.embed_text(query.text)
 
-            # Check if embedding generation was successful
-            if query_embedding is None or query_embedding.embeddings is None:
-                logger.error("Failed to generate query embedding")
-                raise RuntimeError("Query embedding generation failed")
-
-            if len(query_embedding.embeddings) == 0:
-                logger.error("Empty embedding result")
-                raise RuntimeError("Empty embedding result")
-
-            # Prepare ChromaDB query
             where_clause = {}
-
-            # Add category filter
             if query.category_filter:
                 where_clause["category"] = query.category_filter
-
-            # Add custom metadata filters
             where_clause.update(query.metadata_filters)
 
-            # Search in ChromaDB
             chroma_results = self.collection.query(
-                query_embeddings=[query_embedding.embeddings[0].tolist()],
+                query_embeddings=[query_emb.tolist()],
                 n_results=query.max_results,
                 where=where_clause if where_clause else None,
-                include=["documents", "metadatas", "distances"]
+                include=["documents", "metadatas", "distances"],
             )
-            
-            # Process results
+
             results = []
+            ids = chroma_results.get("ids", [[]])[0]
+            distances = chroma_results.get("distances", [[]])[0]
+            metadatas = chroma_results.get("metadatas", [[]])[0]
+            documents = chroma_results.get("documents", [[]])[0]
 
-            # Check if ChromaDB returned valid results
-            if (chroma_results is None or
-                'ids' not in chroma_results or
-                chroma_results['ids'] is None or
-                len(chroma_results['ids']) == 0 or
-                chroma_results['ids'][0] is None):
-                logger.warning("No results returned from ChromaDB")
-            else:
-                # Validate all required fields are present
-                required_fields = ['distances', 'metadatas', 'documents']
-                for field in required_fields:
-                    if (field not in chroma_results or
-                        chroma_results[field] is None or
-                        len(chroma_results[field]) == 0 or
-                        chroma_results[field][0] is None):
-                        logger.error(f"Missing or invalid field in ChromaDB results: {field}")
-                        break
-                else:
-                    # Process valid results
-                    for i in range(len(chroma_results['ids'][0])):
-                        try:
-                            # Calculate similarity from distance
-                            distance = chroma_results['distances'][0][i]
-                            similarity = 1.0 - distance  # Convert distance to similarity
+            for i, doc_id in enumerate(ids):
+                distance = distances[i]
+                similarity = 1.0 - distance
 
-                            # Apply similarity threshold
-                            if similarity >= query.min_similarity:
-                                # Validate metadata has required asset_id
-                                metadata = chroma_results['metadatas'][0][i]
-                                if metadata is None or 'asset_id' not in metadata:
-                                    logger.warning(f"Missing asset_id in metadata for result {i}")
-                                    continue
+                if similarity < query.min_similarity:
+                    continue
 
-                                result = SearchResult(
-                                    asset_id=metadata['asset_id'],
-                                    description=chroma_results['documents'][0][i],
-                                    similarity_score=similarity,
-                                    metadata=metadata,
-                                    distance=distance
-                                )
-                                results.append(result)
-                        except (IndexError, KeyError, TypeError) as e:
-                            logger.warning(f"Error processing result {i}: {str(e)}")
-                            continue
-            
-            processing_time = time.time() - start_time
-            
-            logger.info(f"✅ Found {len(results)} results in {processing_time:.2f}s")
-            
+                meta = metadatas[i] or {}
+                results.append(SearchResult(
+                    asset_id=meta.get("asset_id", doc_id),
+                    description=documents[i] if documents[i] else doc_id,
+                    similarity_score=similarity,
+                    metadata=meta,
+                    distance=distance,
+                ))
+
+            elapsed = time.time() - start
+            logger.info("Search '%s' — %d results in %.3fs",
+                        query.text[:40], len(results), elapsed)
+
             return SearchResponse(
                 query=query.text,
                 results=results,
                 total_found=len(results),
-                processing_time=processing_time,
+                processing_time=elapsed,
                 search_metadata={
                     "collection_size": self.collection.count(),
-                    "embedding_model": self.embedding_config.model_name,
-                    "filters_applied": bool(where_clause)
-                }
+                    "embedding_model": self.clip_config.model_name,
+                },
             )
-            
-        except Exception as e:
-            logger.error(f"Error during search: {str(e)}")
+
+        except Exception:
+            logger.exception("Search failed for query '%s'", query.text[:40])
             raise
-    
+
     def get_collection_stats(self) -> Dict[str, Any]:
-        """Get statistics about the collection"""
-        
         if not self.initialized:
             return {"initialized": False}
-        
+
         try:
             count = self.collection.count()
-            
-            # Get sample metadata to analyze
-            sample = self.collection.get(limit=min(100, count), include=["metadatas"])
-            
             stats = {
                 "initialized": True,
                 "total_documents": count,
                 "collection_name": self.collection_name,
-                "database_path": str(self.db_path)
+                "database_path": str(self.db_path),
             }
-            
-            if sample['metadatas']:
-                # Analyze categories
+
+            if count > 0:
+                sample = self.collection.get(
+                    limit=min(100, count), include=["metadatas"]
+                )
                 categories = {}
-                languages = {}
-                
-                for metadata in sample['metadatas']:
-                    if 'category' in metadata:
-                        cat = metadata['category']
+                for meta in (sample.get("metadatas") or []):
+                    if meta and "category" in meta:
+                        cat = meta["category"]
                         categories[cat] = categories.get(cat, 0) + 1
-                    
-                    if 'language' in metadata:
-                        lang = metadata['language']
-                        languages[lang] = languages.get(lang, 0) + 1
-                
-                stats.update({
-                    "categories": categories,
-                    "languages": languages,
-                    "sample_size": len(sample['metadatas'])
-                })
-            
+                stats["categories"] = categories
+
             return stats
-            
-        except Exception as e:
-            logger.error(f"Error getting collection stats: {str(e)}")
-            return {"initialized": True, "error": str(e)}
-    
+
+        except Exception:
+            logger.exception("Error getting collection stats")
+            return {"initialized": True, "error": "failed"}
+
     def clear_collection(self) -> bool:
-        """Clear all documents from the collection"""
-        
         if not self.initialized:
             return False
-        
+
         try:
-            # Delete and recreate collection
             self.client.delete_collection(self.collection_name)
-            self.collection = self.client.create_collection(
+            self.collection = self.client.get_or_create_collection(
                 name=self.collection_name,
-                metadata={"description": "Fantasy asset descriptions with multilingual support"}
+                metadata={
+                    "hnsw:space": "cosine",
+                    "description": "CLIP embeddings for fantasy 3D assets",
+                },
             )
-            
-            logger.info(f"✅ Cleared collection: {self.collection_name}")
+            logger.info("Cleared collection '%s'", self.collection_name)
             return True
-            
-        except Exception as e:
-            logger.error(f"Error clearing collection: {str(e)}")
+        except Exception:
+            logger.exception("Error clearing collection")
             return False

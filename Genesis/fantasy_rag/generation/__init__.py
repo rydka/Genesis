@@ -1,22 +1,19 @@
-"""
-Fantasy RAG - Module de Génération 3D
-=====================================
-
-Module de génération de mesh 3D avec intégration MeshFormer.
-Comprend la génération à partir de texte, d'images et de concepts fantastiques.
-
-Author: Genesis Project
-Date: January 2025
-"""
-
-from .meshformer_interface import MeshFormerInterface
-from .mesh_generator import MeshGenerator
-from .prompt_to_mesh import PromptToMeshPipeline
-from .concept_generator import ConceptGenerator
+from .background import BackgroundRemover, RefineConfig, refine_mask, BG_MODELS
+from .shape_generator import ShapeGenerator, ShapeConfig, ShapeResult
+from .generation_pipeline import GenerationPipeline, GenerationResult
+from .character_generator import CharacterGenerator, CharacterConfig, CharacterResult
 
 __all__ = [
-    "MeshFormerInterface",
-    "MeshGenerator", 
-    "PromptToMeshPipeline",
-    "ConceptGenerator"
+    "BackgroundRemover",
+    "RefineConfig",
+    "refine_mask",
+    "BG_MODELS",
+    "ShapeGenerator",
+    "ShapeConfig",
+    "ShapeResult",
+    "GenerationPipeline",
+    "GenerationResult",
+    "CharacterGenerator",
+    "CharacterConfig",
+    "CharacterResult",
 ]

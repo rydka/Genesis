@@ -2,7 +2,6 @@
 Configuration settings for Fantasy Assets RAG system
 """
 
-import os
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
@@ -19,6 +18,7 @@ FANTASY_RAG_DIR = PROJECT_ROOT / "fantasy_rag"
 RENDERS_DIR = DATA_DIR / "renders"
 CACHE_DIR = DATA_DIR / "cache"
 DATABASE_DIR = DATA_DIR / "database"
+GENERATED_DIR = DATA_DIR / "generated"
 LOGS_DIR = DATA_DIR / "logs"
 
 @dataclass
@@ -91,11 +91,10 @@ class LLMConfig:
 
 @dataclass
 class EmbeddingConfig:
-    """Configuration for embeddings"""
-    
-    text_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    vision_model: str = "openai/clip-vit-base-patch32"
-    embedding_dim: int = 512
+    """Configuration for CLIP embeddings"""
+
+    clip_model: str = "clip-ViT-L-14"
+    embedding_dim: int = 768
     batch_size: int = 32
 
 @dataclass
@@ -106,6 +105,15 @@ class DatabaseConfig:
     collection_name: str = "fantasy_assets"
     distance_metric: str = "cosine"
     
+@dataclass
+class GenerationConfig:
+    model_id: str = "tencent/Hunyuan3D-2.1"
+    device: str = "cuda"
+    output_dir: str = str(GENERATED_DIR)
+    default_export_format: str = "glb"
+    num_inference_steps: int = 50
+    octree_resolution: int = 384
+
 @dataclass
 class BlenderConfig:
     """Configuration for Blender rendering"""
@@ -124,6 +132,7 @@ class FantasyRAGConfig:
     llm: LLMConfig = None
     embedding: EmbeddingConfig = None
     database: DatabaseConfig = None
+    generation: GenerationConfig = None
     blender: BlenderConfig = None
     
     # Performance settings
@@ -140,6 +149,8 @@ class FantasyRAGConfig:
             self.embedding = EmbeddingConfig()
         if self.database is None:
             self.database = DatabaseConfig()
+        if self.generation is None:
+            self.generation = GenerationConfig()
         if self.blender is None:
             self.blender = BlenderConfig()
 
@@ -153,6 +164,7 @@ def create_directories():
         RENDERS_DIR,
         CACHE_DIR, 
         DATABASE_DIR,
+        GENERATED_DIR,
         LOGS_DIR,
         ASSETS_DIR
     ]
