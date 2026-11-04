@@ -5,6 +5,13 @@ Recherche et génération d'assets 3D fantastiques.
 - **Recherche** : indexe des fichiers STL via un rendu Blender multi-vues et des embeddings CLIP. On cherche en langage naturel (français ou anglais) ; CLIP place texte et images dans le même espace vectoriel.
 - **Génération** : transforme une image de concept en mesh 3D avec Hunyuan3D-2.1, après détourage automatique (birefnet) et affinage du masque.
 
+> **Licences.** Le projet vise un usage commercial dans l'UE. La licence de Hunyuan3D-2.1 ne s'applique pas
+> dans l'UE : il ne sert plus que de référence de recherche et doit être remplacé. Avant d'ajouter un
+> modèle, une dépendance ou un jeu de données, consulter [LICENSES.md](LICENSES.md).
+>
+> Le développement est organisé en agents pour Google Antigravity : voir [.agents/README.md](.agents/README.md).
+> Les résultats des expériences sont dans [docs/experiments.md](docs/experiments.md).
+
 ## Pipelines
 
 ```
