@@ -1,0 +1,14 @@
+-r base.txt
+
+# Développement
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.7.0
+flake8>=6.0.0
+mypy>=1.5.0
+jupyter>=1.0.0
+ipython>=8.14.0
+
+# Debug et profiling
+memory-profiler>=0.61.0
+line-profiler>=4.1.0
