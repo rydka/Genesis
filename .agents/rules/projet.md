@@ -27,6 +27,9 @@ Le fine-tuning de modèles est envisagé.
 - Imiter le style du code existant : densité de commentaires, nommage, gestion des dépendances optionnelles
   (`try/except ImportError` + drapeau `*_AVAILABLE`).
 - `data/`, `ressources/`, `third_party/` et `.venv/` ne sont pas versionnés.
+- **Aucune sortie générée dans git** : rendus, planches de comparaison, meshes, masques, poids. Les écrire
+  sous `data/` (campagnes : `data/bench/`). Avant un commit, vérifier `git status` et retirer tout
+  fichier de ce type qui apparaîtrait.
 - Toujours travailler sur une branche ; jamais de commit direct sur `master`. Une PR par sujet.
 - Lancer `python -m pytest tests/ -q` avant toute PR et rapporter le résultat tel quel.
 - Rapporter les résultats honnêtement : un test raté, une étape sautée ou une conclusion incertaine se
