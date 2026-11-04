@@ -5,6 +5,16 @@
 data/
 ressources/
 
+# Sorties générées, où qu'elles soient : rendus, planches de comparaison, meshes
+**/renders/
+*_views.png
+*.glb
+*.gltf
+*.stl
+*.obj
+*.ply
+*.fbx
+
 # Third-party repos (Hunyuan3D, etc.)
 third_party/
 
