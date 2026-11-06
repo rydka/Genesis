@@ -96,6 +96,20 @@ config/requirements/      # Dépendances (base, development, generation)
 
 Non versionnés : `.venv/`, `data/` (images et sorties de test), `ressources/` (base ChromaDB, rendus), `third_party/` (Hunyuan3D, StdGEN).
 
+### Recalage d'un mesh sur la silhouette de son image (banc d'essai)
+
+`tools/bench/fit_flexicubes.py` recale la forme d'un mesh généré sur la silhouette de son image
+(FlexiCubes, puis finition par remaillage continu ; détails dans `fantasy_rag/diffrender/README.md`).
+**Règle : recaler sur le masque qui a servi à générer le mesh.** Pour les meshes Hunyuan3D, c'est le
+masque affiné `birefnet-general_refined.png` (défaut `--target refined` ; `--mask` reçoit l'alpha brut
+`birefnet-general_raw.png`, le masque affiné est trouvé à côté). `--target raw` recale sur l'alpha
+brut, ce qui retire aussi ce que l'affinage avait comblé et sur quoi le générateur a modelé (la main
+tendue de 3dfab en v2).
+
+```powershell
+.venv\Scripts\python.exe tools\bench\fit_flexicubes.py --mesh M.glb --mask data\bg_comparison\<stem>\birefnet-general_raw.png --camera data\bench\<date>_fit-silhouette\<stem>\camera.json --out data\bench\<date>_fit-v3\<stem> --device cuda --blender
+```
+
 ## Configuration
 
 Les chemins et paramètres sont définis dans `fantasy_rag/config/settings.py` :

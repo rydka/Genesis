@@ -5,32 +5,37 @@ removing or adding material (an artist's signature turned into a lump, a missing
 needs a representation that changes topology (docs/conception/optimisation-par-zones.md, phase 1).
 
   1. camera: reused from fit_silhouette (camera.json), or fitted the same way if absent;
-  1b. target: the raw alpha of the matting model (birefnet), not the refined mask, which closes holes
-     and thickens thin parts for Hunyuan3D (fingers, blade, strands: +1.7 % of pixels on 1464) and made
-     the optimisation grow material to reach them. Soft alpha: binary target alpha > 0.5 (measures,
-     error regions, zones), continuous alpha in the L2 loss, and a signed distance to the 0.5 contour
-     computed at sub-pixel precision (alpha supersampled x4, bilinear), so that the pixel staircase of
-     a binary contour is not extruded into the cut walls. Measures are also given against the other
-     mask (the refined one by default) for comparison;
+  1b. target: rule, fit the mesh to the mask it was generated from. For the Hunyuan3D meshes that is
+     the refined mask (birefnet-general_refined.png: holes closed, thin parts thickened); the raw
+     alpha of the matting model (--target raw) removes what the closing created, and on 3dfab that
+     was the outstretched hand (campaign 2026-11-07 v2). Soft alpha: binary target alpha > 0.5
+     (measures, error regions, zones), continuous alpha in the L2 loss, and a signed distance to the
+     0.5 contour computed at sub-pixel precision (alpha supersampled x4, bilinear). Measures are also
+     given against the other mask for comparison;
   1c. error regions: only large compact differences between the silhouette of the input and the
      target are corrected (an artist's signature turned into a lump: ~11 000 px), not the 1-3 px
      ribbons along the contour (matting noise). Excess and missing pixels separately: morphological
      opening (disk of `region_open_px`), connected components of at least `region_min_area_px`, then
      back to the full error pixels around the kept cores; a weight falls smoothly from 1 on a region to
-     0 at `region_transition_px` from it. Carving and optimisation act only there (steps 3 and 4);
+     0 at `region_transition_px` from it. Optimisation and finishing act only there (steps 4, 5).
+     An excess region is "detached" when at least `detach_min_area_px` of its pixels lie farther
+     than `detach_depth_frac` x sqrt(target area) from the target (the signature of 1464);
   2. initial SDF: signed distance of the input mesh at the vertices of a grid around it (open3d,
      sign by a parity vote over 15 ray directions, see fantasy_rag/diffrender/sdf_grid.py),
      truncated to +-trunc voxels. Extracted without optimisation, it must give back the input shape
      (non-regression measure: chamfer distance "flexicubes_init" in summary.json);
   3. zones of the grid vertices, by their projection into the target mask (one view only):
-       - cut: nothing of the object can project outside the mask (visual hull of one view). With
-         an orthographic camera the hull is the extrusion of the mask, and the SDF of the cut shape
-         is max(SDF, 2D distance to the mask / scale), exact at every depth (CSG intersection).
-         Only in the excess regions: elsewhere the hull is the target plus the input's own
-         silhouette grown by a margin (no cut), blended smoothly in the transition;
+       - cut, in the detached excess regions only: nothing of the object can project outside the
+         target grown by `detach_offset_voxels` (visual hull of one view; with an orthographic camera
+         the extrusion of the mask, SDF max(SDF, 2D distance / scale), exact at every depth), blended
+         smoothly with "no cut" over `detach_transition_px`. A one-view hull is poorly informative near
+         frontal views (Wang et al. 2018, arXiv 1809.03451): cut everywhere (--carve regions, campaign
+         v2), it striped the face profile of 1464 and sawed the cloth edges of 3dfab, surfaces seen at
+         a grazing angle whose silhouette is merely offset. Elsewhere the material goes by step 4;
        - active: projection within `band_px` of the mask boundary (inside, or outside by less than
-         half a voxel), |SDF| < trunc and within an error region or its transition: the optimised
-         parameters, their change tapered by the region weight;
+         half a voxel) with |SDF| < trunc, or outside the target in an excess region (whatever the
+         depth in the material: it must be removable), and within an error region or its
+         transition: the optimised parameters, their change tapered by the region weight;
        - frozen: everything else (projection well inside the mask: the front and back surfaces seen
          through the silhouette, which one view cannot constrain). Their SDF does not change at all;
   4. optimisation of the active SDF values: silhouette rendered by the in-house rasterizer
@@ -41,8 +46,16 @@ needs a representation that changes topology (docs/conception/optimisation-par-z
      (else bubbles in the air next to the surface). Only the cubes near active vertices are
      re-extracted at each iteration. The silhouette losses are weighted per pixel by the region
      weight: the differences outside the regions pull nothing;
-  5. finishing pass: fit_silhouette's in-plane vertex displacements on the FlexiCubes mesh, capped
-     (a few pixels), with the flipped-face penalty;
+  4b. connected components smaller than 1 % of the largest are dropped (tips of strands left
+     floating when their middle was removed);
+  5. finishing pass on the FlexiCubes mesh (remesh_finish): in-plane vertex steps along the in-plane
+     part of the normal, smoothed, Adam with a uniform denominator, Laplacian of the displacement
+     field, cap of 8 px, and continuous remeshing at every iteration (Palfinger 2022, "Continuous
+     Remeshing for Inverse Rendering", CAVW 33(5), DOI 10.1002/cav.2101; vendored code in
+     fantasy_rag/diffrender/remeshing), restricted to the error regions. Leung et al. 2022 (CVPR
+     workshop L3D-IVU, "Black-Box Test-Time Shape REFINEment") found that silhouette-only refinement
+     degenerates without displacement and smoothness regularisers. --finish vertex: the former
+     fit_silhouette displacements (fixed connectivity, cap 3 px, flipped-face penalty);
   6. measures for input / FlexiCubes / FlexiCubes + finishing: IoU (global, head, edge band),
      flipped faces (finishing), normals opposed to the input's, chamfer distance to the input split
      into zones (visible, hidden, silhouette band), times; plate, Blender renders and a sheet that
@@ -50,12 +63,18 @@ needs a representation that changes topology (docs/conception/optimisation-par-z
 
 Usage (from the repository root; outputs go under data/, never in git):
     .venv\\Scripts\\python.exe tools/bench/fit_flexicubes.py --mesh M.glb --mask RAW_ALPHA.png
-        [--refined-mask REFINED.png] [--target raw|refined] [--all-errors] [--image SOURCE.jpg] [--camera data/bench/<date>_fit-silhouette/<stem>/camera.json]
+        [--refined-mask REFINED.png] [--target refined|raw] [--carve detached|regions|none]
+        [--finish remesh|vertex|none] [--all-errors] [--image SOURCE.jpg]
+        [--camera data/bench/<date>_fit-silhouette/<stem>/camera.json]
         --out data/bench/<date>_fit-flexicubes/<stem> [--device cpu|cuda|auto] [--res 128] [--blender]
+
+--mask is the raw alpha (birefnet-general_raw.png); the refined mask is found next to it
+(_raw -> _refined) unless --refined-mask is given. Default target: the refined one (rule above).
 
 --device cuda/auto take the GPU lock of the main repository (tools/bench/gpu_lock.py) and fall back
 to the CPU when another job holds it. The script is resumable: the SDF grid, the FlexiCubes mesh and
-the finished mesh are cached in the output folder, and a finished run (summary.json) is skipped
+the finished mesh (flexicubes_remesh.glb, or flexicubes_finish.glb with --finish vertex) are cached
+in the output folder, and a finished run (summary.json) is skipped
 unless --force.
 """
 
@@ -97,8 +116,22 @@ class FlexiConfig:
     pad: int = 4                        # empty cubes around the box
     trunc_voxels: float = 6.0           # |SDF| clamped to trunc_voxels * h; active only below it
     n_dirs: int = 15                    # ray directions of the sign vote
-    carve: bool = True
+    # Visual-hull cut (step 3): "detached" (default) cuts only the excess regions that stand far out
+    # of the target (detached parts: the signature of 1464), "regions" every large excess region
+    # (campaign 2026-11-07 v2: stripes on the face profile, saw teeth on cloth edges), "none" no cut
+    # (all removal by the optimisation). With regions = False (--all-errors) any cut is everywhere.
+    carve: str = "detached"
     carve_margin_px: float = 0.0        # the visual hull is the mask grown by this many pixels
+    # Detached excess: a large excess region with at least `detach_min_area_px` pixels farther than
+    # `detach_depth_frac` x sqrt(target area) from the target (0.06: 30 px on 1464, 27 px on 3dfab;
+    # the deepest excess of a surface seen edge-on was 25 px, the signature 39 px). Its cut follows
+    # the target contour grown by `detach_offset_voxels` (the cut wall stays off the target contour;
+    # the thin remainder is left to the optimisation), weighted by a transition of
+    # `detach_transition_px` pixels.
+    detach_depth_frac: float = 0.06
+    detach_min_area_px: int = 300
+    detach_offset_voxels: float = 3.0
+    detach_transition_px: float = 16.0
     # The mask distance is smoothed (Gaussian, pixels) before the cut, so that the pixel staircase of
     # the mask contour is not extruded into the cut wall; the cut is a smooth max (round edge where
     # it meets the original surface) of radius carve_round_voxels.
@@ -127,8 +160,14 @@ class FlexiConfig:
     smooth_iters: int = 48              # change = S^k u, S = averaging with grid neighbours
     # Soft cap on adding material, in voxels: lowering the SDF far from the surface creates bubbles
     # in the air next to it (beads along the hair); within the cap they merge with the surface.
-    # Larger gaps are left to the finishing pass. 0 = no cap.
-    max_grow_voxels: float = 4.0
+    # Larger gaps are left to the finishing pass. 0 = no cap. 1.5 since campaign v3: with the
+    # refined target, 4 voxels raised a ridge beside the knife hand of 1464 (a notch between the
+    # ridge and the thumb); the finishing pass grows the contour more smoothly.
+    max_grow_voxels: float = 1.5
+    # Connected components of the extracted mesh smaller than this fraction of the largest one (in
+    # faces) are dropped: removing material in the middle of a strand leaves its tip floating in the
+    # air (3dfab, left of the head). The input meshes are one component. 0 = keep all.
+    min_component_frac: float = 0.01
     w_sdf: float = 0.5
     w_l2: float = 1.0
     w_fid: float = 2e-4                 # mean over active vertices of ((s - s_ref) / h)^2
@@ -215,8 +254,10 @@ def disk(r: float) -> np.ndarray:
 class ErrorRegions:
     excess: np.ndarray    # [H, W] bool: large excess regions (rendered, not in the target)
     missing: np.ndarray   # [H, W] bool: large missing regions
+    detached: np.ndarray  # [H, W] bool: the excess regions that stand far out of the target
     w_cut: np.ndarray     # [H, W] in [0, 1]: where the visual hull cuts
     w_opt: np.ndarray     # [H, W] in [0, 1]: where the optimisation acts (excess or missing)
+    w_excess: np.ndarray  # [H, W] in [0, 1]: excess regions only (removal outside the target)
     sdf_free: np.ndarray  # [H, W] signed distance (px) to target | input silhouette: the no-cut hull
     info: dict
 
@@ -233,9 +274,13 @@ def region_weight(region: np.ndarray, transition_px: float) -> np.ndarray:
 
 
 def error_regions(sil: np.ndarray, target: np.ndarray, cfg: FlexiConfig) -> ErrorRegions:
-    """Large compact differences between the input silhouette `sil` and `target` (both bool)."""
+    """Large compact differences between the input silhouette `sil` and `target` (both bool), and
+    among the excess ones those detached from the target (FlexiConfig.detach_*)."""
     from scipy import ndimage
     info, out = {}, {}
+    dist_out = ndimage.distance_transform_edt(~target)          # px from the target, 0 inside
+    depth_px = cfg.detach_depth_frac * math.sqrt(float(target.sum()))
+    detached = np.zeros_like(target)
     for name, err in (("excess", sil & ~target), ("missing", ~sil & target)):
         k = disk(cfg.region_open_px) if cfg.region_open_px > 0 else None
         core = ndimage.binary_opening(err, k) if k is not None else err
@@ -247,24 +292,43 @@ def error_regions(sil: np.ndarray, target: np.ndarray, cfg: FlexiConfig) -> Erro
         grow = disk(cfg.region_open_px + 1) if k is not None else np.ones((3, 3), bool)
         out[name] = err & ndimage.binary_dilation(keep[lab], grow)
         comps = []
+        full_lab, _ = ndimage.label(out[name], np.ones((3, 3), bool))
         for i in np.nonzero(keep)[0]:
             ys, xs = np.nonzero(lab == i)
-            comps.append({"area_px": int(areas[i]), "x": int(xs.mean()), "y": int(ys.mean())})
+            c = {"area_px": int(areas[i]), "x": int(xs.mean()), "y": int(ys.mean())}
+            if name == "excess":
+                comp = full_lab == full_lab[ys[0], xs[0]]
+                far = int((comp & (dist_out > depth_px)).sum())
+                c.update({"depth_px": float(dist_out[comp].max()), "far_px": far,
+                          "detached": far >= cfg.detach_min_area_px})
+                if c["detached"]:
+                    detached |= comp
+            comps.append(c)
         info[name] = {"pixels": int(err.sum()), "kept_pixels": int(out[name].sum()),
                       "components": int(n), "kept": sorted(comps, key=lambda c: -c["area_px"])}
-    w_cut = region_weight(out["excess"], cfg.region_transition_px)
+    info["detach_depth_px"] = float(depth_px)
+    info["detached_pixels"] = int(detached.sum())
+    if cfg.carve == "regions":
+        w_cut = region_weight(out["excess"], cfg.region_transition_px)
+    elif cfg.carve == "detached":
+        w_cut = region_weight(detached, cfg.detach_transition_px)
+    else:
+        w_cut = np.zeros(target.shape, np.float32)
     w_opt = region_weight(out["excess"] | out["missing"], cfg.region_transition_px)
-    return ErrorRegions(out["excess"], out["missing"], w_cut, w_opt,
+    w_excess = region_weight(out["excess"], cfg.region_transition_px)
+    return ErrorRegions(out["excess"], out["missing"], detached, w_cut, w_opt, w_excess,
                         fs.signed_distance(target | sil), info)
 
 
 def regions_image(sil: np.ndarray, target: np.ndarray, reg: ErrorRegions) -> Image.Image:
-    """Error map of the input: light red / blue = every excess / missing pixel, dark = kept regions."""
+    """Error map of the input: light red / blue = every excess / missing pixel, dark = kept regions,
+    purple = detached excess (cut)."""
     img = fs.error_map(sil, target)
     img[sil & ~target] = (255, 175, 175)
     img[~sil & target] = (175, 175, 255)
     img[reg.excess] = (200, 0, 0)
     img[reg.missing] = (0, 0, 200)
+    img[reg.detached] = (110, 0, 110)
     return Image.fromarray(img)
 
 
@@ -315,8 +379,8 @@ def smooth_max(a: np.ndarray, b: np.ndarray, k: float) -> np.ndarray:
 
 def make_zones(grid: Grid, s0: np.ndarray, cam: fs.OrthoCamera, sdf_full: np.ndarray,
                cfg: FlexiConfig, regions: Optional[ErrorRegions] = None) -> Tuple[Zones, dict]:
-    """Zones of the grid vertices; `regions` None: every difference is corrected (cut everywhere,
-    active all along the band)."""
+    """Zones of the grid vertices; `regions` None: every difference is corrected (cut everywhere
+    unless carve = "none", active all along the band)."""
     from scipy import ndimage
     H = sdf_full.shape[0]
     voxel_px = grid.h * cam.scale * H
@@ -326,25 +390,30 @@ def make_zones(grid: Grid, s0: np.ndarray, cam: fs.OrthoCamera, sdf_full: np.nda
     md = mask_distance_px(pts, cam, sdf_s).reshape(grid.vertex_dims)
     trunc = cfg.trunc_voxels * grid.h
     s = s0
-    info = {}
+    info = {"carve": cfg.carve}
     taper = None
     if regions is not None:
         uv, _ = project_px(pts, cam)
         taper = sample_image(regions.w_opt, uv, outside=0.0).reshape(grid.vertex_dims)
-    if cfg.carve:
+    if cfg.carve != "none" and (regions is None or regions.w_cut.max() > 0):
         # Orthographic camera: the visual hull of the mask is its extrusion along the view axis, and
         # the distance of a point to it is the 2D distance of its projection to the mask. The SDF of
         # the intersection (CSG) is max(s0, d_hull), here a smooth max: an exact cut at every depth.
-        d_cut = md - cfg.carve_margin_px
+        # A one-view hull extruded along the view is poorly informative near frontal views (Wang et
+        # al. 2018, arXiv 1809.03451): cut where the excess stands far out of the target only.
+        offset = cfg.carve_margin_px
+        if regions is not None and cfg.carve == "detached":
+            offset += cfg.detach_offset_voxels * voxel_px
+        d_cut = md - offset
         if regions is not None:
-            # Outside the excess regions the hull is the target plus the input's own silhouette, grown
+            # Outside the cut regions the hull is the target plus the input's own silhouette, grown
             # by twice the rounding radius of the smooth max so that the cut does not touch the
             # surface there; blended with the exact cut by the region weight (no step at a region end).
             free_margin = 2 * cfg.carve_round_voxels * voxel_px + 1.0
             w = sample_image(regions.w_cut, uv, outside=0.0).reshape(grid.vertex_dims)
             d_free = sample_image(regions.sdf_free, uv, outside=1e4).reshape(grid.vertex_dims)
             d_cut = w * d_cut + (1 - w) * (d_free - free_margin)
-            info["free_margin_px"] = float(free_margin)
+            info.update({"free_margin_px": float(free_margin), "cut_offset_px": float(offset)})
         d_hull = d_cut / (cam.scale * H)
         s = smooth_max(s0, d_hull, cfg.carve_round_voxels * grid.h)
     carved = (s0 < 0) & (s >= 0)                      # material removed by the cut
@@ -353,7 +422,12 @@ def make_zones(grid: Grid, s0: np.ndarray, cam: fs.OrthoCamera, sdf_full: np.nda
     near = (md >= -(cfg.band_px + 2 * voxel_px)) & ~outside
     active = near & (np.abs(s) < trunc)
     if taper is not None:
+        # Without a cut everywhere, the excess material outside the target is removed by the
+        # optimisation: every vertex projecting outside the target in an excess region (inside the
+        # material or in its band) is active, whatever its depth in the material.
+        w_ex = sample_image(regions.w_excess, uv, outside=0.0).reshape(grid.vertex_dims)
         active &= taper > 1e-3
+        active |= outside & (s < trunc) & (w_ex > 1e-3)
     info.update({"voxel_px": float(voxel_px), "carved_inside_vertices": int(carved.sum()),
                  "active_vertices": int(active.sum()), "band_px_total": cfg.band_px + 2 * voxel_px,
                  "frozen_outside_threshold_px": cfg.carve_margin_px + 0.5 * voxel_px})
@@ -512,6 +586,200 @@ def optimise(sparse: SparseGrid, s_ref: torch.Tensor, active_idx: torch.Tensor, 
             break
     with torch.no_grad():
         return field()
+
+
+def drop_small_components(verts: torch.Tensor, faces: torch.Tensor, min_frac: float
+                          ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+    """Drop the connected components (sharing vertices) with fewer faces than `min_frac` x the
+    largest one; unreferenced vertices are removed."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    f = faces.numpy()
+    n = verts.shape[0]
+    e = np.concatenate([f[:, [0, 1]], f[:, [1, 2]]])
+    _, lab = connected_components(coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(n, n)),
+                                  directed=False)
+    flab = lab[f[:, 0]]
+    sizes = np.bincount(flab)
+    keep_lab = sizes >= min_frac * sizes.max()
+    info = {"components": int((sizes > 0).sum()), "kept": int(keep_lab.sum()),
+            "dropped_faces": int(sizes[~keep_lab].sum())}
+    if keep_lab.all():
+        return verts, faces, info
+    fk = f[keep_lab[flab]]
+    used = np.unique(fk)
+    remap = np.full(n, -1, np.int64)
+    remap[used] = np.arange(len(used))
+    return verts[torch.from_numpy(used)], torch.from_numpy(remap[fk]), info
+
+
+# --------------------------------------------------------------------------------------------------
+# Finishing pass: continuous remeshing
+# --------------------------------------------------------------------------------------------------
+
+@dataclass
+class RemeshConfig:
+    """Finishing pass: in-plane vertex optimisation with continuous remeshing at every iteration
+    (Palfinger 2022, fantasy_rag/diffrender/remeshing). Lengths are relative to the mean edge length
+    l0 of the start mesh (the FlexiCubes output, about 0.95 voxel)."""
+    levels: Sequence[Tuple[int, int, int]] = ((512, 2, 120),)
+    lr_px: float = 0.5                  # largest step, pixels of the full target
+    betas: Tuple[float, float] = (0.9, 0.999)
+    # Remeshing (only where the region weight is above min_weight): reference edge length l0,
+    # collapse below (1 - tol) l0, split above (1 + tol) l0, edge flips towards valence 6.
+    edge_len_tol: float = 0.5
+    remesh_every: int = 1
+    # The silhouette gradient of a vertex is projected on the image-plane part of its unit normal
+    # (the contour moves across itself, faces seen from the front do not move; as fit_silhouette's
+    # direction "normal") and averaged with its neighbours this many times (0.5 (g + mean)).
+    grad_smooth_iters: int = 16
+    # Laplacian regularisation of the displacement field (not of the geometry, whose details stay):
+    # after each step d <- d - lap (d - mean of the neighbours' d).
+    lap: float = 0.5
+    # Cap on the displacement from the start mesh, pixels of the full target (hard clamp).
+    max_disp_px: float = 8.0
+    w_sdf: float = 0.5
+    w_l2: float = 1.0
+    # Vertices whose region weight (FlexiConfig error regions, step 1c) is below this neither move nor
+    # get remeshed: the surface far from the corrected regions stays the FlexiCubes one exactly.
+    min_weight: float = 1e-3
+    log_every: int = 10
+
+
+def _neighbour_mean(x: torch.Tensor, e2: torch.Tensor, deg: torch.Tensor) -> torch.Tensor:
+    return torch.zeros_like(x).index_add_(0, e2[:, 0], x[e2[:, 1]]) / deg[:, None]
+
+
+def remesh_finish(verts: torch.Tensor, faces: torch.Tensor, alpha_full: np.ndarray,
+                  sdf_full: np.ndarray, cam: fs.OrthoCamera, zscale: float, cfg: RemeshConfig,
+                  weight_img: Optional[np.ndarray], history: List[dict], log,
+                  time_budget_s: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+    """Optimise the vertices of (verts, faces) against the silhouette, remeshing at every iteration.
+
+    Silhouette losses weighted per pixel by `weight_img` (the error regions, None = 1 everywhere).
+    Steps: in-plane, along the in-plane part of the vertex normal, smoothed over the neighbours,
+    Adam with a uniform denominator (largest second moment over the mesh, as UniformAdam), scaled by
+    the region weight of each vertex; Laplacian regularisation of the displacement field; displacement
+    from the start mesh clamped to `max_disp_px`. Then the remeshing of Palfinger 2022 (edge
+    collapses and splits around a reference length, flips, collapse of faces flipped against their
+    vertex normals), restricted to the vertices of weight above `min_weight`; the per-vertex state
+    (start position, weight, moments) is carried through it (averaged on splits and collapses).
+
+    The optimiser of the paper (per-vertex normalised Adam with a velocity-scaled Laplacian on the
+    geometry) was tried first and crumpled the surface on one view: see docs/experiments.md.
+    Returns (verts, faces, info)."""
+    from fantasy_rag.diffrender.remeshing import calc_edges, calc_vertex_normals, remesh
+    device = verts.device
+    H, W = alpha_full.shape
+    with torch.no_grad():
+        p = fs.CameraParams(cam).to(device)
+        rot, scale, center = p.rot(), p.log_scale.exp(), p.center.clone()
+        view = rot[2] / rot[2].norm()                  # camera axis in mesh coordinates
+    if weight_img is not None:
+        uv, _ = project_px(verts.cpu(), cam)
+        w0 = torch.from_numpy(sample_image(weight_img, uv, outside=0.0)).float().to(device)
+    else:
+        w0 = torch.ones(verts.shape[0], device=device)
+    l0 = float(fs.mean_edge_length(verts, faces))
+    px = float(scale) * H                              # pixels per mesh unit
+    cap = cfg.max_disp_px / px
+    # per-vertex state: position 0:3, start position 3:6, weight 6, first moment 7:10, second 10
+    P, A, WC, M1, M2 = slice(0, 3), slice(3, 6), 6, slice(7, 10), 10
+    etc = torch.zeros(verts.shape[0], 11, device=device)
+    etc[:, P], etc[:, A], etc[:, WC] = verts, verts, w0
+    f = faces.clone()
+    b1, b2 = cfg.betas
+    t_step = 0
+
+    def do_remesh(etc, f):
+        free = etc[:, WC] > cfg.min_weight
+        mn = torch.where(free, torch.full_like(etc[:, 0], l0 * (1 - cfg.edge_len_tol)),
+                         torch.zeros_like(etc[:, 0]))
+        mx = torch.where(free, torch.full_like(etc[:, 0], l0 * (1 + cfg.edge_len_tol)),
+                         torch.full_like(etc[:, 0], float("inf")))
+        return remesh(etc, f, mn, mx, flip=True, max_vertices=4e6, flip_mask_column=WC)
+
+    log(f"  remesh finish: {verts.shape[0]} vertices, {faces.shape[0]} faces, mean edge "
+        f"{l0 * px:.2f} px, cap {cfg.max_disp_px:g} px, {int((w0 > cfg.min_weight).sum())} free vertices")
+    t0 = time.perf_counter()
+    stop = False
+    n_it = 0
+    for long_side, ss, iters in cfg.levels:
+        hw = fs.level_size((H, W), long_side)
+        tgt = fs.Target.make(alpha_full, sdf_full, hw, device)
+        w_px = (torch.tensor(fs.resample(weight_img, hw), device=device) if weight_img is not None
+                else None)
+        for it in range(iters):
+            v = etc[:, P].clone().requires_grad_(True)
+            clip = fs.to_clip(v @ rot.T, scale, center, W / H, zscale)
+            alpha = fs.render_alpha(clip, f, hw, ss)
+            if w_px is None:
+                l_sdf, l_l2 = fs.silhouette_losses(alpha, tgt)
+            else:
+                l_sdf = (w_px * alpha * tgt.sdf).mean()
+                l_l2 = (w_px * (alpha - tgt.alpha) ** 2).mean()
+            loss = cfg.w_sdf * l_sdf + cfg.w_l2 * l_l2
+            loss.backward()
+            with torch.no_grad():
+                e = calc_edges(f)[0]
+                e2 = torch.cat([e, e.flip(1)])
+                deg = torch.bincount(e2[:, 0], minlength=v.shape[0]).clamp(min=1).to(v.dtype)
+                vn = calc_vertex_normals(v, f)
+                npl = vn - (vn @ view)[:, None] * view   # in-plane part of the normal, length <= 1
+                g = (v.grad * npl).sum(1, keepdim=True) * npl
+                for _ in range(cfg.grad_smooth_iters):
+                    g = 0.5 * (g + _neighbour_mean(g, e2, deg))
+                wv = etc[:, WC].clamp(0, 1)
+                g *= (wv > cfg.min_weight).to(g.dtype)[:, None]
+                # Adam with a uniform denominator
+                t_step += 1
+                etc[:, M1] = b1 * etc[:, M1] + (1 - b1) * g
+                etc[:, M2] = b2 * etc[:, M2] + (1 - b2) * (g * g).sum(1)
+                m_hat = etc[:, M1] / (1 - b1 ** t_step)
+                v_max = (etc[:, M2].max() / (1 - b2 ** t_step)).sqrt().clamp(min=1e-30)
+                step = -(cfg.lr_px / px) * m_hat / v_max
+                step -= (step @ view)[:, None] * view    # in-plane
+                d = etc[:, P] + wv[:, None] * step - etc[:, A]
+                if cfg.lap > 0:                          # smooth displacement field
+                    lap = d - _neighbour_mean(d, e2, deg)
+                    lap -= (lap @ view)[:, None] * view
+                    d = d - cfg.lap * wv[:, None] * lap
+                n = d.norm(dim=1, keepdim=True).clamp(min=1e-12)
+                etc[:, P] = etc[:, A] + d * (cap / n).clamp(max=1.0)
+                if t_step % cfg.remesh_every == 0:
+                    etc, f = do_remesh(etc, f)
+            n_it += 1
+            rec = {"phase": "remesh", "level": long_side, "iter": it, "loss": float(loss),
+                   "sdf": float(l_sdf), "l2": float(l_l2), "faces": int(f.shape[0])}
+            history.append(rec)
+            if it % cfg.log_every == 0 or it == iters - 1:
+                dmax = float((etc[:, P] - etc[:, A]).norm(dim=1).max())
+                log(f"  remesh {long_side}x{ss} it {it:3d}: loss {rec['loss']:.5f} l2 {rec['l2']:.5f} "
+                    f"sdf {rec['sdf']:.5f} faces {rec['faces']} max|d| {dmax * px:.1f} px "
+                    f"({time.perf_counter() - t0:.0f} s)")
+            if time_budget_s and time.perf_counter() - t0 > time_budget_s:
+                log(f"  time budget of {time_budget_s:.0f} s reached, stopping")
+                stop = True
+                break
+        if stop:
+            break
+    disp = (etc[:, P] - etc[:, A]).norm(dim=1) * px
+    info = {"iterations": n_it, "start_edge_px": l0 * px, "seconds": round(time.perf_counter() - t0, 1),
+            "displacement_max_px": float(disp.max()), "displacement_mean_px": float(disp.mean())}
+    return etc[:, P].clone(), f, info
+
+
+def flipped_against(ref_v: np.ndarray, ref_f: np.ndarray, verts: np.ndarray, faces: np.ndarray
+                    ) -> Tuple[int, float]:
+    """(number, area fraction) of faces whose normal points against the normal of the closest face
+    of a reference mesh (the start mesh of a finishing pass whose faces were changed by remeshing)."""
+    ref_q = SurfaceQuery(ref_v, ref_f)
+    ref_n = face_normals(torch.from_numpy(ref_v), torch.from_numpy(ref_f)).numpy()
+    tri = verts[faces]
+    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    area = np.linalg.norm(n, axis=1)
+    flip = ((n * ref_n[ref_q.closest_face(tri.mean(1))]).sum(1) < 0) & (area > 0)
+    return int(flip.sum()), float(area[flip].sum() / max(area.sum(), 1e-20))
 
 
 # --------------------------------------------------------------------------------------------------
@@ -675,12 +943,14 @@ def load_camera(verts, faces, alpha_full, sdf_full, camera_json: Optional[Path],
 
 
 def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path], cfg: FlexiConfig,
-        finish_cfg: Optional[fs.FitConfig], camera_json: Optional[Path] = None, blender: bool = False,
+        finish_cfg, camera_json: Optional[Path] = None, blender: bool = False,
         force: bool = False, time_budget_s: Optional[float] = None,
         finish_budget_s: Optional[float] = None, n_samples: int = 300_000,
         other_mask: Optional[Tuple[str, Path]] = None) -> dict:
-    """`mask_path`: the target (raw alpha by default); `other_mask` (name, path): a second mask the
-    silhouettes are also measured against (the refined one), for comparison only."""
+    """`mask_path`: the target (the mask the mesh was generated from: the refined one for the
+    Hunyuan3D meshes); `other_mask` (name, path): a second mask the silhouettes are also measured
+    against (the raw alpha), for comparison only. `finish_cfg`: RemeshConfig (continuous remeshing,
+    default), fs.FitConfig (former vertex displacements) or None."""
     out.mkdir(parents=True, exist_ok=True)
     summary_path = out / "summary.json"
     log_file = open(out / "fit.log", "a", encoding="utf-8")
@@ -727,8 +997,12 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         regions_image(sil_in, target, regions).save(out / "regions.png")
         log("error regions: " + "; ".join(
             f"{k} {v['kept_pixels']} of {v['pixels']} px kept, components "
-            + ", ".join(f"{c['area_px']} px at ({c['x']}, {c['y']})" for c in v["kept"])
-            for k, v in regions.info.items()))
+            + ", ".join(f"{c['area_px']} px at ({c['x']}, {c['y']})"
+                        + (f" depth {c['depth_px']:.0f} px, far {c['far_px']} px"
+                           + (" DETACHED" if c["detached"] else "") if "depth_px" in c else "")
+                        for c in v["kept"])
+            for k, v in regions.info.items() if isinstance(v, dict))
+            + f"; detached = more than {regions.info['detach_depth_px']:.1f} px out of the target")
     zones, zone_info = make_zones(grid, s0, cam, sdf_full, cfg, regions)
     if regions is not None:
         zone_info["regions"] = regions.info
@@ -765,9 +1039,10 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         if hist_path.exists():
             history = json.loads(hist_path.read_text(encoding="utf-8"))
     else:
-        with torch.no_grad():
-            v_c, f_c, _ = fc.extract(sparse, s_ref)
-        stages["carved"] = (v_c.cpu(), f_c.cpu())
+        if zone_info["carved_inside_vertices"] > 0:       # a cut happened: keep it as a stage
+            with torch.no_grad():
+                v_c, f_c, _ = fc.extract(sparse, s_ref)
+            stages["carved"] = (v_c.cpu(), f_c.cpu())
         log("FlexiCubes optimisation")
         s_opt = optimise(sparse, s_ref, active_idx, alpha_full, sdf_full, cam, zscale, cfg, history,
                          log, time_budget_s, taper,
@@ -775,7 +1050,9 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         with torch.no_grad():
             v_fc, f_fc, _ = fc.extract(sparse, s_opt)
             ds = (s_opt - s_init).abs() / grid.h
-        v_fc, f_fc = v_fc.cpu(), f_fc.cpu()
+        v_fc, f_fc, comp_info = drop_small_components(v_fc.cpu(), f_fc.cpu(), cfg.min_component_frac)
+        zone_info["components"] = comp_info
+        log(f"connected components: {comp_info}")
         fs.export_glb(v_fc.numpy(), f_fc.numpy(), fc_glb)
         (out / "history_flexicubes.json").write_text(json.dumps(history), encoding="utf-8")
         timings["flexicubes_optim_s"] = round(time.perf_counter() - t0, 1)
@@ -784,8 +1061,26 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
     stages["flexicubes"] = (v_fc, f_fc)
 
     # Finishing pass (cached)
-    fin_glb = out / "flexicubes_finish.glb"
-    if finish_cfg is not None:
+    finish_info = {}
+    if isinstance(finish_cfg, RemeshConfig):
+        fin_name = "flexicubes_remesh"
+        fin_glb = out / f"{fin_name}.glb"
+        t0 = time.perf_counter()
+        if fin_glb.exists() and not force:
+            v_fin, f_fin = (torch.from_numpy(a) for a in fs.load_mesh(fin_glb))
+            log(f"finished mesh loaded from {fin_glb}")
+        else:
+            log("finishing pass (continuous remeshing)")
+            v_fin, f_fin, finish_info = remesh_finish(
+                v_fc.to(device), f_fc.to(device), alpha_full, sdf_full, cam, zscale, finish_cfg,
+                regions.w_opt if regions is not None else None, history, log, finish_budget_s)
+            v_fin, f_fin = v_fin.cpu(), f_fin.cpu()
+            fs.export_glb(v_fin.numpy(), f_fin.numpy(), fin_glb)
+            timings["finish_s"] = round(time.perf_counter() - t0, 1)
+        stages[fin_name] = (v_fin, f_fin)
+    elif finish_cfg is not None:
+        fin_name = "flexicubes_finish"
+        fin_glb = out / f"{fin_name}.glb"
         t0 = time.perf_counter()
         if fin_glb.exists() and not force:
             v_fin = torch.from_numpy(fs.load_mesh(fin_glb)[0])
@@ -796,7 +1091,9 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
                               history, log, finish_budget_s).cpu()
             fs.export_glb(v_fin.numpy(), f_fc.numpy(), fin_glb)
             timings["finish_s"] = round(time.perf_counter() - t0, 1)
-        stages["flexicubes_finish"] = (v_fin, f_fc)
+        stages[fin_name] = (v_fin, f_fc)
+    else:
+        fin_name = None
 
     # Measures
     t0 = time.perf_counter()
@@ -813,7 +1110,12 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
                 metrics[name][f"vs_{other_mask[0]}"] = fs.measure(sils[name], other, other_zones)
         else:
             log(f"{other_mask[1]}: size {other.shape} differs from the target, not measured")
-    if "flexicubes_finish" in stages:
+    if fin_name == "flexicubes_remesh":
+        v_fin, f_fin = stages[fin_name]
+        n, a = flipped_against(v_fc.numpy(), f_fc.numpy(), v_fin.numpy(), f_fin.numpy())
+        metrics[fin_name].update({"flipped_faces": n, "flipped_faces_fraction": n / len(f_fin),
+                                  "flipped_area_fraction": a, **finish_info})
+    if fin_name == "flexicubes_finish":
         n, a = fs.flipped_faces(v_fc, stages["flexicubes_finish"][0], f_fc)
         metrics["flexicubes_finish"].update({"flipped_faces": n, "flipped_faces_fraction": n / len(f_fc),
                                              "flipped_area_fraction": a})
@@ -849,7 +1151,7 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
     if "carved" in stages:
         fs.export_glb(stages["carved"][0].numpy(), stages["carved"][1].numpy(), out / "carved.glb")
     fs.export_glb(v_i.cpu().numpy(), f_i.cpu().numpy(), out / "flexicubes_init.glb")
-    plate_sils = {k: sils[k] for k in ("input", "flexicubes", "flexicubes_finish") if k in sils}
+    plate_sils = {k: sils[k] for k in ("input", "flexicubes", fin_name) if k in sils}
     plate3(image_path, target, plate_sils, metrics, out / "plate.png")
     if history:
         fs.loss_curve(history).save(out / "loss.png")
@@ -859,7 +1161,7 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         "mesh": str(mesh_path), "mask": str(mask_path), "image": str(image_path) if image_path else None,
         "other_mask": {"name": other_mask[0], "path": str(other_mask[1])} if other_mask else None,
         "mask_size_wh": [W, H], "target_islands": island_info, "config": asdict(cfg),
-        "finish_config": asdict(finish_cfg) if finish_cfg is not None else None,
+        "finish": fin_name, "finish_config": asdict(finish_cfg) if finish_cfg is not None else None,
         "camera": cam.to_dict(), "grid": grid.to_dict(), "sdf": sdf_info, "zones": zone_info,
         "sparse": {"cubes": sparse.n_cubes, "vertices": int(sparse.verts.shape[0]),
                    "active": int(active_idx.numel())},
@@ -873,7 +1175,7 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
 
     if blender:
         render_dir = out / "renders"
-        names = [n for n in ("input", "carved", "flexicubes", "flexicubes_finish")
+        names = [n for n in ("input", "carved", "flexicubes", "flexicubes_finish", "flexicubes_remesh")
                  if (out / f"{n}.glb").exists()]
         if fs.BLENDER.exists():
             cmd = [str(fs.BLENDER), "-b", "-P", str(ROOT / "tools/debug/render_glb_views.py"), "--",
@@ -895,8 +1197,10 @@ def main():
     parser.add_argument("--refined-mask", type=Path, default=None,
                         help="refined mask (refine_mask, made for Hunyuan3D); default: the --mask path "
                              "with _raw replaced by _refined, if it exists")
-    parser.add_argument("--target", choices=("raw", "refined"), default="raw",
-                        help="mask the shape is fitted to; the other one is measured for comparison")
+    parser.add_argument("--target", choices=("raw", "refined"), default="refined",
+                        help="mask the shape is fitted to (rule: the mask the mesh was generated from, "
+                             "the refined one for Hunyuan3D meshes); the other one is measured for "
+                             "comparison")
     parser.add_argument("--all-errors", action="store_true",
                         help="correct every difference (former behaviour), not only the large regions")
     parser.add_argument("--region-open-px", type=float, default=None)
@@ -914,15 +1218,23 @@ def main():
     parser.add_argument("--res", default="auto",
                         help="grid resolution (longest side); auto = 256 on the GPU, 128 on the CPU")
     parser.add_argument("--levels", default=None, help="e.g. '256:2:60,512:2:100'")
-    parser.add_argument("--no-carve", action="store_true", help="no visual-hull carving")
+    parser.add_argument("--carve", choices=("detached", "regions", "none"), default=None,
+                        help="visual-hull cut: detached excess only (default), every excess region "
+                             "(campaign v2), or none")
+    parser.add_argument("--no-carve", action="store_true", help="same as --carve none")
     parser.add_argument("--band-px", type=float, default=None)
     parser.add_argument("--w-fid", type=float, default=None)
     parser.add_argument("--lr", type=float, default=None, help="SDF step in voxels")
     parser.add_argument("--smooth-iters", type=int, default=None)
     parser.add_argument("--max-grow", type=float, default=None, help="cap on added material, voxels")
-    parser.add_argument("--no-finish", action="store_true", help="skip the finishing pass")
-    parser.add_argument("--finish-cap-px", type=float, default=3.0)
-    parser.add_argument("--finish-levels", default="512:2:60")
+    parser.add_argument("--finish", choices=("remesh", "vertex", "none"), default="remesh",
+                        help="finishing pass: continuous remeshing (default), former in-plane vertex "
+                             "displacements, or none")
+    parser.add_argument("--no-finish", action="store_true", help="same as --finish none")
+    parser.add_argument("--finish-cap-px", type=float, default=None,
+                        help="displacement cap of the finishing pass (default 8 remesh, 3 vertex)")
+    parser.add_argument("--finish-levels", default=None,
+                        help="default '512:2:120' (remesh), '512:2:60' (vertex)")
     parser.add_argument("--finish-w-flip", type=float, default=None)
     parser.add_argument("--time-budget", type=float, default=None, help="FlexiCubes, seconds")
     parser.add_argument("--finish-budget", type=float, default=None, help="finishing, seconds")
@@ -942,8 +1254,10 @@ def main():
         cfg.res = (256 if device.startswith("cuda") else 128) if args.res == "auto" else int(args.res)
         if args.levels:
             cfg.levels = levels(args.levels)
+        if args.carve is not None:
+            cfg.carve = args.carve
         if args.no_carve:
-            cfg.carve = False
+            cfg.carve = "none"
         if args.band_px is not None:
             cfg.band_px = args.band_px
         if args.w_fid is not None:
@@ -975,9 +1289,17 @@ def main():
         else:
             mask, other = args.mask, (("refined", refined) if refined is not None else None)
         finish = None
-        if not args.no_finish:
-            finish = fs.FitConfig(device=device, deform_levels=levels(args.finish_levels),
-                                  max_disp_px=args.finish_cap_px, w_flip=FINISH_W_FLIP)
+        kind = "none" if args.no_finish else args.finish
+        if kind == "remesh":
+            finish = RemeshConfig()
+            if args.finish_levels:
+                finish.levels = levels(args.finish_levels)
+            if args.finish_cap_px is not None:
+                finish.max_disp_px = args.finish_cap_px
+        elif kind == "vertex":
+            finish = fs.FitConfig(device=device, deform_levels=levels(args.finish_levels or "512:2:60"),
+                                  max_disp_px=(args.finish_cap_px if args.finish_cap_px is not None
+                                               else 3.0), w_flip=FINISH_W_FLIP)
             if args.finish_w_flip is not None:
                 finish.w_flip = args.finish_w_flip
         run(args.mesh, mask, args.out, args.image, cfg, finish, args.camera, args.blender,

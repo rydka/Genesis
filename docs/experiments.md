@@ -86,6 +86,25 @@ référence (`1464…`, `3dfab…`), caméra orthographique recalée sur le masq
   pointes, les régions si ; mais quand le mesh a été généré depuis le masque affiné, le recaler sur le
   masque brut retire aussi ce que la fermeture avait créé, parfois une main.
 
+- **Masque affiné, découpe des seuls excès détachés, finition par remaillage continu** (2026-11-07 v3,
+  `data/bench/2026-11-07_fit-v3/`, détails dans `fantasy_rag/diffrender/README.md`). Règle : recaler
+  sur le masque qui a servi à générer le mesh (affiné pour Hunyuan3D). La découpe par l'enveloppe
+  d'une vue ne reste que pour les excès loin de la cible (seule la signature de 1464 l'est) ; le reste
+  est retiré par l'optimisation régularisée (Wang et al. 2018 : enveloppe d'une vue peu informative de
+  face ; Leung et al. 2022 : régulariser déplacement et lissage ; la transposition à notre découpe est
+  notre hypothèse). Finition avec le remaillage de Palfinger 2022 (code MIT copié). **Réglé** : stries
+  du visage de 1464, main tendue de 3dfab (gardée), morceaux flottants ; dents de scie de l'étoffe
+  nettement réduites. **Pas réglé** : petite crête près du pouce de la main au couteau (le masque
+  affiné y diffère du mesh ; la v2 sur masque brut la laissait intacte), bosse sous le poing, moignon
+  strié de la signature derrière la cape, pointes des lanières de 3dfab ; deux lanières coupées en leur
+  milieu puis retirées. IoU contre l'affiné 0,975 et 0,947 (v2 : 0,974 et 0,940), contre le brut 0,966
+  et 0,930 (v2 : 0,984 et 0,955). **Enseignements** : (1) l'optimiseur de l'article (pas normalisé
+  par sommet, laplacien sur la géométrie) froisse la surface avec une seule vue ; seul le remaillage
+  est repris, avec notre pas lissé à dénominateur uniforme et un laplacien du champ de déplacement ;
+  (2) sans découpe, l'optimisation retire bien un excès mince (profil du visage) mais coupe une lanière
+  en trop au milieu au lieu de la déplacer ; (3) plafonner l'ajout de matière à 1,5 voxel plutôt que 4
+  évite une crête à côté de la main au couteau.
+
 ## Pistes non explorées
 
 - Détourage guidé (boîte ou points, par exemple SAM 2) pour garder les accessoires, ou birefnet en plus

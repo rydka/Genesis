@@ -91,8 +91,9 @@ def test_mesh_sdf_sign_next_to_a_hole():
 
 
 @needs_open3d
-@pytest.mark.parametrize("regions", [False, True])
-def test_fit_removes_a_protrusion_outside_the_silhouette(regions):
+@pytest.mark.parametrize("regions,carve", [(False, "detached"), (True, "regions"), (True, "detached"),
+                                           (True, "none")])
+def test_fit_removes_a_protrusion_outside_the_silhouette(regions, carve):
     fit = pytest.importorskip("tools.bench.fit_flexicubes")
     fs = fit.fs
     # Input: a sphere plus a lump behind it that sticks out sideways (like the signature on 1464).
@@ -108,15 +109,17 @@ def test_fit_removes_a_protrusion_outside_the_silhouette(regions):
     alpha = target.astype(np.float32)
     sdf_full = fs.signed_distance(target)
 
-    cfg = fit.FlexiConfig(res=40, levels=((128, 2, 25),), log_every=1000)
+    cfg = fit.FlexiConfig(res=40, levels=((128, 2, 25),), log_every=1000, carve=carve,
+                          detach_min_area_px=40)
     grid, s0, _ = fit.initial_sdf(verts.numpy(), faces.numpy(), cfg, None, log=lambda *_: None)
     reg = None
     if regions:   # only the lump is a large error region: carving and optimisation act there only
         cfg.region_open_px, cfg.region_min_area_px = 2.0, 40   # 96 px high image: smaller regions
         reg = fit.error_regions(fs.hard_silhouette(verts, faces, cam, hw, hw), target, cfg)
         assert reg.excess.sum() > 50 and not reg.missing.any()
+        assert reg.detached.any()          # the lump stands ~11 px out of a ~35 px radius disc
     zones, info = fit.make_zones(grid, s0, cam, sdf_full, cfg, reg)
-    assert info["carved_inside_vertices"] > 0
+    assert (info["carved_inside_vertices"] > 0) == (carve != "none")
     sparse = fit.build_sparse(grid, zones, "cpu")
     flat = sparse.vert_flat.numpy()
     s_ref = torch.from_numpy(zones.s_ref.reshape(-1)[flat])
@@ -128,6 +131,9 @@ def test_fit_removes_a_protrusion_outside_the_silhouette(regions):
 
     iou_in = fs.iou(fs.hard_silhouette(verts, faces, cam, hw, hw), target)
     iou_out = fs.iou(fs.hard_silhouette(v, f, cam, hw, hw), target)
+    if carve == "none":   # optimisation alone: the lump shrinks but 25 iterations do not remove it
+        assert iou_out > iou_in + 0.01, (iou_in, iou_out)
+        return
     assert iou_in < 0.96 and iou_out > 0.98, (iou_in, iou_out)
     # The lump is gone: nothing left near its centre
     assert float((v - torch.tensor([0.75, 0.0, -0.35])).norm(dim=1).min()) > 0.1
@@ -157,11 +163,26 @@ def test_error_regions_keep_a_lump_and_drop_thin_ribbons():
     sil = np.hypot(xx - 70, yy - 60) < 42                     # 2 px ribbon all around: noise
     sil |= np.hypot(xx - 115, yy - 60) < 14                    # lump sticking out on the right
     sil &= ~(np.hypot(xx - 70, yy - 22) < 3)                   # small notch at the top: noise
-    reg = fit.error_regions(sil, target, fit.FlexiConfig())
+    reg = fit.error_regions(sil, target, fit.FlexiConfig(carve="regions"))
     assert reg.excess[60, 120] and not reg.excess[60, 29]      # lump kept, ribbon on the left not
     assert not reg.missing.any()
     assert reg.w_cut[60, 120] == 1 and reg.w_cut[60, 29] == 0 and 0 < reg.w_cut[60, 104] < 1
     assert len(reg.info["excess"]["kept"]) == 1
+
+
+def test_only_excess_far_out_of_the_target_is_detached():
+    fit = pytest.importorskip("tools.bench.fit_flexicubes")
+    yy, xx = np.mgrid[0:260, 0:300]
+    target = np.hypot(xx - 130, yy - 130) < 90                 # sqrt(area) 160: depth 9.6 px
+    sil = target.copy()
+    sil |= (np.hypot(xx - 130, yy - 130) < 98) & (xx < 80)     # 8 px wide crescent: edge-on surface
+    sil |= np.hypot(xx - 228, yy - 130) < 20                    # lump 30 px out on the right
+    reg = fit.error_regions(sil, target, fit.FlexiConfig())
+    comps = reg.info["excess"]["kept"]
+    assert len(comps) >= 2 and sum(c["detached"] for c in comps) == 1, comps
+    assert reg.detached[130, 240] and not reg.detached[130, 36] and reg.excess[130, 36]
+    assert reg.w_cut[130, 240] == 1 and reg.w_cut[130, 36] == 0      # default carve: detached only
+    assert reg.w_excess[130, 36] == 1                                  # still optimised there
 
 
 def test_target_islands_are_dropped_without_touching_the_silhouette():

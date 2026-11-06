@@ -423,7 +423,7 @@ visage) ; la finition ne les recrée pas.
 
 Retour de l'utilisateur sur la version du 2026-11-06 : la silhouette s'améliore mais **visage et
 mains sont déformés** (stries sur la mèche et le front, bosses sur le dessus des cheveux, pointes sur
-le pouce et la main au couteau). Deux corrections, actives par défaut :
+le pouce et la main au couteau). Deux corrections (la cible brute n'est plus le défaut depuis la v3, voir plus bas) :
 
 1. **Cible = alpha brut du détoureur** (`birefnet-general_raw.png`, `--mask`), et non plus le masque
    affiné (`refine_mask`, conçu pour Hunyuan3D : il ferme les trous et épaissit les parties fines,
@@ -483,6 +483,73 @@ Contrôle visuel (zooms 2048 et 3072 px, `tools/bench/zoom_sheet.py`, `<stem>/zo
   régions qui le font.
 - **Finition** : elle ne réintroduit pas de pointe visible sur les mains (une légère sur le pouce de
   1464), mais retourne maintenant 5 à 7 faces.
+
+### Masque affiné, découpe des seuls excès détachés, finition par remaillage continu (2026-11-07, v3)
+
+Retour sur la v2 : mains de 1464 réglées (régions d'erreur, gardées), mais **main tendue de 3dfab
+coupée** par le masque brut, **stries du visage** de 1464 et **dents de scie** sur les bords d'étoffe
+de 3dfab dès la découpe. Trois changements, par défaut :
+
+1. **Cible = le masque qui a servi à générer le mesh** : pour Hunyuan3D, le masque affiné
+   (`--target refined` par défaut, `--mask` reste l'alpha brut, le masque affiné est trouvé à côté) ;
+   `--target raw` reste disponible.
+2. **Plus de découpe générale par l'enveloppe** (`--carve detached` par défaut). Appuis : Wang et al.
+   2018 (arXiv 1809.03451) montrent que l'enveloppe visuelle d'une seule vue est peu informative près des
+   vues de face ; Leung et al. 2022 (CVPR workshop L3D-IVU) que le raffinement par la seule silhouette
+   dégénère sans régularisation de déplacement et de lissage. Transposition (non établie par ces
+   articles) : notre découpe orthographique est une enveloppe à une vue extrudée le long du regard, et
+   les stries et dents de scie apparaissent là où elle coupe une surface vue de biais. Le retrait de
+   matière passe donc par l'optimisation régularisée (sommets actifs aussi hors de la cible dans les
+   régions en trop, quelle que soit leur profondeur dans la matière). La découpe ne reste que pour les
+   **excès détachés** : au moins 300 px à plus de 0,06 × √(aire de la cible) de la cible (27 px sur
+   1464, 26 px sur 3dfab) ; parmi les régions en trop des deux images, seule la signature de 1464 (39 px
+   de profondeur, 497 px au-delà) l'est ; le profil du visage (25 px, 0 px au-delà) ne l'est pas. Le
+   critère est calé sur ces deux images. La découpe suit la cible élargie de 3 voxels (la paroi reste
+   hors du contour, l'optimisation retire le reste) avec une transition de 16 px. Ajout de matière
+   plafonné à 1,5 voxel (4 avant : crête à côté de la main au couteau) ; composantes connexes de moins
+   de 1 % de la plus grande retirées (bouts de mèches laissés en l'air).
+3. **Finition par remaillage continu** (`--finish remesh` par défaut ; `--finish vertex` = ancienne
+   finition). Palfinger 2022 (CAVW 33(5), DOI 10.1002/cav.2101) : remaillage à chaque itération
+   (effondrement des arêtes courtes et des faces retournées, découpe des longues, bascules vers la
+   valence 6). Code MIT copié dans `remeshing/` (commit épinglé, `torch_scatter` remplacé par
+   `scatter_reduce_` et `index_add_`, voir son README). Le remaillage n'agit que dans les régions
+   d'erreur. **L'optimiseur de l'article n'est pas utilisé** : essayé tel quel puis avec gradients
+   projetés et lissés, il froisse la surface (pas normalisé par sommet : un petit gradient isolé déplace
+   un sommet d'un pas entier ; laplacien sur la géométrie, en 3D). Pas retenu : pas dans le plan le long
+   de la normale, lissé (16 moyennes avec les voisins), Adam à dénominateur uniforme, laplacien du
+   champ de déplacement, plafond 8 px, pas atténué par le poids des régions.
+
+Résultats (`data/bench/2026-11-07_fit-v3/`, même caméra, RTX 2000 Ada) :
+
+| | 1464 (grille 256) | 3dfab (grille 384) |
+|---|---|---|
+| IoU affiné : entrée → découpe → FlexiCubes → remaillage | 0,914 → 0,925 → 0,956 → **0,975** | 0,889 → (pas de découpe) → 0,937 → **0,947** |
+| IoU brut, après finition | 0,966 | 0,930 |
+| v2 (défaut) après finition, affiné / brut | 0,974 / 0,984 | 0,940 / 0,955 |
+| Chamfer visible / caché (px) | 0,11 / 0,07 | 0,21 / 0,17 |
+| Normales opposées (aire) | 0,11 % | 0,28 % |
+| Faces retournées par la finition (contre FlexiCubes) | 74 (0,01 % de l'aire) | 66 (0,01 %) |
+| Faces : entrée → FlexiCubes → remaillage | 1 263 986 → 590 008 → 597 162 | 417 662 → 398 624 → 402 084 |
+| Temps : SDF, FlexiCubes, finition | 66 s, 89 s, 19 s | 38 s, 68 s, 12 s |
+| Pic de VRAM | 0,73 Gio | 0,52 Gio |
+
+Contrôle visuel (zooms 2048 et 3072 px, lignes `input`, `v2`, `v3_*`) :
+
+- **Visage de 1464 : stries réglées** (face et trois quarts, à toutes les étapes v3). Yeux, nez,
+  bouche intacts ; le profil recule un peu. Reste de fines ondulations sur la mèche gauche du front
+  après le remaillage.
+- **Main tendue de 3dfab : réglée** (attachée et identique à l'entrée). Tête et poing proches de
+  l'entrée ; plus de morceau flottant à gauche de la tête.
+- **Dents de scie de l'étoffe de 3dfab : nettement réduites**, les marches de voxels de l'entrée
+  elle-même restent.
+- **Mains de 1464 : moins bien qu'en v2.** Le masque affiné diffère du mesh autour de la main au
+  couteau (régions en trop et en manque) : une petite crête près du pouce apparaît dès FlexiCubes,
+  adoucie par la finition ; petite bosse sous le poing (déjà en v2).
+- **Signature de 1464** : retirée de la silhouette ; de trois quarts, un moignon plus petit qu'en v2
+  mais strié par la paroi de découpe reste derrière la cape (non observable depuis une vue).
+- **Pas réglé** : les pointes des lanières d'étoffe de 3dfab qui dépassent la cible ; deux lanières
+  sous le genou sont coupées en leur milieu par l'optimisation puis retirées comme composantes isolées
+  (2 588 faces) au lieu d'être déplacées ; IoU plus basses qu'en v2 (pas de découpe).
 
 Sur CPU (4 fils), une itération coûte environ 1 s en 128, 3 à 5 s en 256 et 8 à 10 s en 384 :
 compter 10 à 25 min par mesh en 256 ; sur GPU 0,2 à 1 s.
