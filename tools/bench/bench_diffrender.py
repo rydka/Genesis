@@ -1,0 +1,131 @@
+"""Time and memory of the in-house differentiable rasterizer (fantasy_rag.diffrender).
+
+Usage (from the repository root):
+    .venv\\Scripts\\python.exe tools/bench/bench_diffrender.py --device cpu --faces 1000000 --res 512
+    .venv\\Scripts\\python.exe tools/bench/bench_diffrender.py --device cuda --faces 1000000 --res 512
+
+A GPU run must respect data/.gpu-lock (rule gpu-et-environnement): the script refuses to start on
+CUDA while the lock exists. Nothing is written to disk; results are printed.
+
+Scene: a UV sphere with about --faces faces filling most of the image, i.e. a dense mesh with
+sub-pixel triangles as produced by the image-to-3D generators. Measured:
+  - visibility only (rasterize under no_grad);
+  - a full optimisation step: rasterize + interpolate (normals, depth) + antialiased silhouette,
+    then backward to the vertex positions.
+"""
+
+import argparse
+import math
+import os
+import sys
+import time
+from pathlib import Path
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from fantasy_rag.diffrender import (  # noqa: E402
+    Camera, antialias, interpolate, look_at, perspective, rasterize, uv_sphere, vertex_normals,
+)
+
+
+def _sync(device):
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+
+
+def _timed(fn, device, repeat):
+    times = []
+    out = None
+    for _ in range(repeat):
+        _sync(device)
+        t0 = time.perf_counter()
+        out = fn()
+        _sync(device)
+        times.append(time.perf_counter() - t0)
+    return min(times), out
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--faces", type=int, default=1_000_000)
+    parser.add_argument("--res", type=int, default=512)
+    parser.add_argument("--max-fragments", type=int, default=1 << 22)
+    parser.add_argument("--repeat", type=int, default=3)
+    args = parser.parse_args()
+
+    device = torch.device(args.device)
+    if device.type != "cuda":
+        run(args, device)
+        return
+    lock = ROOT / "data" / ".gpu-lock"
+    if lock.exists():
+        sys.exit(f"{lock} exists: another GPU job is running, retry later")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(f"agent: bench_diffrender\npid: {os.getpid()}\n"
+                    f"start: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"task: diffrender benchmark {args.faces} faces {args.res}px\n", encoding="utf-8")
+    try:
+        run(args, device)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def run(args, device):
+    # 2 (rings - 1) segments faces with segments = 2 rings
+    rings = max(4, int(round(math.sqrt(args.faces / 4.0))))
+    v, f = uv_sphere(rings, 2 * rings, radius=1.0)
+    v, f = v.to(device), f.to(device)
+    cam = Camera(look_at((0.3, 0.2, 2.6)), perspective(55.0), (args.res, args.res))
+    mvp = cam.mvp.to(device)
+    print(f"device={device} faces={f.shape[0]} vertices={v.shape[0]} res={args.res} "
+          f"max_fragments={args.max_fragments} torch={torch.__version__}")
+
+    def to_clip(x):
+        ones = torch.ones_like(x[:, :1])
+        return torch.cat([x, ones], 1) @ mvp.T
+
+    def visibility():
+        with torch.no_grad():
+            return rasterize(to_clip(v), f, args.res, max_fragments=args.max_fragments)
+
+    def step():
+        verts = v.clone().requires_grad_()
+        clip = to_clip(verts)
+        rast = rasterize(clip, f, args.res, max_fragments=args.max_fragments)
+        normals = interpolate(vertex_normals(verts, f), rast, f)
+        alpha = antialias(rast.mask.to(clip.dtype).unsqueeze(-1), rast, clip, f)
+        loss = alpha.mean() + rast.depth.mean() + normals.square().mean()
+        loss.backward()
+        return verts.grad
+
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    t_vis, rast = _timed(visibility, device, args.repeat)
+    covered = int(rast.mask.sum())
+    mem_vis = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else None
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    t_step, grad = _timed(step, device, args.repeat)
+    mem_step = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else None
+
+    print(f"covered pixels: {covered} ({covered / args.res ** 2:.0%}), "
+          f"vertices with gradient: {int((grad.abs().sum(1) > 0).sum())}")
+    print(f"visibility (rasterize, no grad): {t_vis * 1000:.0f} ms"
+          + (f", peak {mem_vis:.2f} GiB" if mem_vis is not None else ""))
+    print(f"optimisation step (forward + backward): {t_step * 1000:.0f} ms"
+          + (f", peak {mem_step:.2f} GiB" if mem_step is not None else ""))
+    if device.type == "cpu":
+        try:
+            import psutil
+            rss = psutil.Process(os.getpid()).memory_info().peak_wset / 2**30
+            print(f"process peak working set: {rss:.2f} GiB")
+        except (ImportError, AttributeError):
+            pass
+
+
+if __name__ == "__main__":
+    main()

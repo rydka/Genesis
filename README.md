@@ -81,12 +81,14 @@ fantasy_rag/              # Package principal
 ├── embeddings/           # Embedder CLIP + recherche ChromaDB
 ├── database/             # Gestion ChromaDB + pipeline d'indexation
 ├── generation/           # Détourage, Hunyuan3D (formes), StdGEN (personnages)
+├── diffrender/           # Rasteriseur différentiable maison (pur PyTorch), voir son README
 ├── config/               # Configuration (settings.py)
 └── utils/                # Utilitaires (fichiers, mesh, images)
 apps/streamlit/app.py     # Interface utilisateur
 tests/                    # Tests pytest
 tools/debug/              # Outils d'expérimentation (comparaison de détourage,
                           #   balayage d'hyperparamètres, rendu de GLB)
+tools/bench/              # Mesures (temps et mémoire du rasteriseur différentiable)
 config/requirements/      # Dépendances (base, development, generation)
 ```
 
