@@ -289,6 +289,13 @@ recadrées en 512² font environ 1 Go et 0,3 s par itération sur le GPU.
 
 ## Tests
 
+`tests/test_flexicubes.py` (CPU, une quinzaine de secondes) : FlexiCubes creux identique à la version
+dense d'origine, extraction d'une SDF analytique (erreur < 0,4 voxel, normales vers l'extérieur), SDF
+d'une sphère par open3d et aller-retour, signe juste à côté d'un trou, recalage qui fait disparaître
+une excroissance hors silhouette sans toucher au reste. `tests/test_fit_silhouette.py` : plafond de
+déplacement, faces retournées, poids laplacien normalisé sur la sphère de test.
+`tests/test_gpu_lock.py` : verrou du dépôt principal, pris, respecté, libéré.
+
 `tests/test_diffrender.py` (CPU, une trentaine de secondes) : couverture et barycentriques d'un
 triangle contre un calcul analytique, interpolation corrigée de la perspective (points sur le plan
 du triangle, reprojetés sur les centres de pixels), z-buffer indépendant de l'ordre, cube vu de face,
@@ -329,6 +336,91 @@ retrouvée, mais les grandes corrections (une excroissance à faire disparaître
 se font en écrasant la surface dans le plan : 1 à 1,4 % de faces retournées et des plis visibles sous
 d'autres angles. Une correction de ce type demande un changement de topologie (FlexiCubes) plutôt
 qu'un déplacement de sommets.
+
+Ajouts du 2026-11-06 (fin de journée), pour s'en servir comme **finition** après FlexiCubes :
+
+- `--max-disp-px` : plafond doux du déplacement (|d| → c · tanh(|d| / c)), en pixels de la cible ;
+- `--w-flip` / `--flip-cos` : pénalité des faces retournées, moyenne de relu(cos₀ − cos(n₀, n))² sur
+  les faces (n₀ : normale initiale) ;
+- terme laplacien **normalisé** par le carré de la longueur moyenne des arêtes (en hauteurs de cible) :
+  le poids ne dépend plus de la densité du mesh. `w_lap = 2` remplace les anciens 2e5 (meshes de 0,4 à
+  1,3 M faces) et 2e3 (sphère de test de 1 k sommets) : même IoU sur 3dfab (0,9937 contre 0,993) et
+  sur la sphère ; `--lap-unnormalized` rend l'ancien terme ;
+- `--device cuda|auto` prend le verrou GPU du **dépôt principal** (`tools/bench/gpu_lock.py`, aussi
+  depuis une copie de travail) et reste sur CPU s'il est pris.
+
+Mesure de la pénalité sur 3dfab, recalage complet sans plafond : faces retournées 1,49 % → 0,59 %
+(w = 1) → 0,22 % (w = 10), mais IoU 0,994 → 0,970 → 0,935 : elle freine trop les grandes corrections
+pour servir seule, elle convient à la finition plafonnée (0 face retournée, voir ci-dessous).
+
+## Application : forme par FlexiCubes (changement de topologie)
+
+`tools/bench/fit_flexicubes.py` recale la **forme** d'un mesh sur la silhouette avec FlexiCubes
+(copie épinglée Apache-2.0 dans `flexicubes/`, voir son README) et le rasteriseur maison. Briques
+réutilisables dans `sdf_grid.py` :
+
+- `make_grid`, `grid_points` : grille de voxels cubiques autour de l'objet ;
+- `mesh_sdf` : distance signée par open3d (`compute_distance`) ; **signe par vote de parité sur 15
+  directions de rayons** (`count_intersections`). Le `compute_signed_distance` d'open3d tire ses rayons
+  dans une seule direction (même avec `nsamples`) : sur une sphère dont on a ôté la calotte z > 0,9, il
+  se trompe sur 8 300 points sur 195 000 (une colonne sous le trou), le vote sur 15 directions sur 0 ;
+  il ne se trompe qu'à partir de très grands trous (calotte z > 0,7 : 1 % des points). Les deux meshes
+  de référence sont fermés (vote unanime sur 99,9996 % des points, 0 point ambigu) ;
+- `SparseGrid`, `SparseFlexiCubes` : FlexiCubes sur une **bande de cubes** seulement ; seule la levée
+  d'ambiguïté C16/C19 (`_get_case_id`), qui suppose une grille dense, est réécrite (voisin trouvé par
+  ses coordonnées). Testé identique à FlexiCubes dense sur un champ bruité.
+
+Déroulé :
+
+1. caméra : `camera.json` de `fit_silhouette` (orthographique) ;
+2. SDF du mesh aux sommets de la grille (256 sur le plus grand côté par défaut sur GPU), tronquée à
+   ± 6 voxels. **Non-régression** : extraite sans optimisation, elle redonne l'entrée à 0,06 px
+   (1464, voxel 2,5 px) et 0,18 px (3dfab en 384, voxel 4,2 px) de distance de Chamfer ;
+3. **découpe par l'enveloppe visuelle** : avec une caméra orthographique, l'enveloppe visuelle d'un
+   masque est son extrusion le long de l'axe de vue, et la distance d'un point à cette enveloppe est la
+   distance 2D de sa projection au masque. La SDF de l'intersection est max(s₀, d_masque / échelle) :
+   une découpe exacte à toutes les profondeurs. La distance au masque est lissée (gaussienne de 1,5 px)
+   et le max est un max lisse (rayon 1,5 voxel), sinon les marches de pixels du contour sont extrudées
+   en stries sur la paroi découpée ;
+4. **optimisation** des valeurs de SDF des seuls sommets **actifs** (projection à moins de ~11 à 14 px
+   du bord du masque, |SDF| < 6 voxels) ; tous les autres sommets sont **figés** (un seul point de vue
+   ne contraint pas les faces avant et arrière vues à travers la silhouette). Pertes : longue portée
+   + L2 sur la silhouette (`edge_gradients`, sur-échantillonnage × 2, pyramide 256 → 512), L_dev et
+   entropie croisée des signes de FlexiCubes, fidélité à la SDF de départ. Paramétrisation **lisse** du
+   changement (S⁴⁸ u, S : moyenne avec les voisins de grille, sinon chaque sommet bouge seul et la
+   surface se couvre de terrasses de voxels) et **plafond doux de 4 voxels sur l'ajout de matière**
+   (au-delà, abaisser la SDF loin de la surface crée des bulles dans l'air : perles sur les cheveux).
+   Seuls les cubes proches des sommets actifs sont ré-extraits à chaque itération ; le reste de la bande
+   est rendu une fois par niveau et composé (α = 1 − (1 − α_dyn)(1 − α_fixe)) ;
+5. **finition** : déplacement de sommets de `fit_silhouette`, plafonné à 3 px, pénalité des faces
+   retournées w = 1 ;
+6. mesures (IoU globale, tête, bords ; normales opposées à celles de la face d'entrée la plus proche ;
+   Chamfer à l'entrée par zone : visible, cachée, bande de silhouette), planche, rendus Blender.
+
+Résultats (2026-11-06, RTX 2000 Ada, deux meshes Hunyuan3D-2.1 de référence, usage interne) :
+
+| | 1464 (voxel 2,5 px, grille 256) | 3dfab (voxel 4,2 px, grille 384) |
+|---|---|---|
+| IoU entrée → FlexiCubes → + finition | 0,914 → 0,984 → **0,992** | 0,889 → 0,967 → **0,977** |
+| IoU tête | 0,829 → 0,956 → 0,984 | 0,915 → 0,974 → 0,984 |
+| IoU bords (± 4 px) | 0,473 → 0,806 → 0,906 | 0,481 → 0,780 → 0,841 |
+| Chamfer visible / caché (px) | 0,12 / 0,07 | 0,26 / 0,21 |
+| Faces retournées (finition) | 0 | 0 |
+| Temps (GPU) | 2 min 33 optimisation + 17 s finition | 1 min 52 + 11 s |
+| Pic de VRAM | 0,77 Gio | 0,54 Gio |
+
+Les zones cachées et visibles hors bande ne bougent pas (Chamfer ≤ 0,26 px, du même ordre que
+l'extraction sans optimisation) ; toutes les corrections sont dans la bande de silhouette. Sur 1464,
+la signature disparaît de la silhouette et la cape n'est plus froissée de côté ni de dos ; **reste un
+moignon** de la signature dans le dos de la cape : la partie de l'excroissance qui se projette à
+l'intérieur du masque (derrière la cape) n'est pas observable depuis une seule vue. Une heuristique
+« retirer la matière derrière la surface avant, près d'une grosse excroissance » a été essayée et
+abandonnée : elle troue la cape (une étoffe oblique n'a pas une épaisseur constante le long du rayon).
+Autre limite : l'extraction à 256 ou 384 lisse les détails plus fins qu'un voxel (mèches,
+visage) ; la finition ne les recrée pas.
+
+Sur CPU (4 fils), une itération coûte environ 1 s en 128, 3 à 5 s en 256 et 8 à 10 s en 384 :
+compter 10 à 25 min par mesh en 256 ; sur GPU 0,2 à 1 s.
 
 ## Prochaines étapes
 

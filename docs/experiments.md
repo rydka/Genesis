@@ -45,6 +45,37 @@ Ces défauts apparaissent quel que soit le détourage :
 5. **Petite tête** : le visage est le point faible tant qu'il occupe peu de pixels (environ 40 px dans
    l'image de 512 px vue par le générateur). Sur un buste, il est nettement plus détaillé.
 
+## Recalage d'un mesh sur la silhouette de son image (novembre 2026)
+
+Outils : `tools/bench/fit_silhouette.py`, `tools/bench/fit_flexicubes.py`, rasteriseur maison
+`fantasy_rag/diffrender/` (détails et chiffres dans son README). Deux meshes Hunyuan3D-2.1 de
+référence (`1464…`, `3dfab…`), caméra orthographique recalée sur le masque birefnet affiné. Sorties :
+`data/bench/2026-11-06_fit-silhouette/` et `data/bench/2026-11-06_fit-flexicubes/`.
+
+- **Déplacement de sommets seul** (dans le plan de l'image) : silhouette presque parfaite (IoU 0,914 →
+  0,996 et 0,889 → 0,993), mais **dégradation 3D là où la correction est forte**. Sur `1464…`, la
+  signature d'artiste devenue excroissance dans le dos est écrasée dans le plan au lieu de disparaître :
+  cape froissée et déchiquetée de côté et de dos, cheveux plus rugueux ; 1,1 à 1,4 % de faces
+  retournées. **Enseignement** : le déplacement de sommets ne convient qu'aux petites corrections ;
+  retirer ou ajouter de la matière demande une représentation qui change de topologie.
+- **FlexiCubes** (SDF sur grille, voxel 2,5 à 4,2 px) : la matière qui se projette hors du masque est
+  retirée par l'enveloppe visuelle (découpe exacte en orthographique), puis une optimisation limitée à la
+  bande de silhouette corrige le reste. IoU 0,914 → 0,984 et 0,889 → 0,967 ; les zones visibles et
+  cachées hors bande ne bougent pas (Chamfer ≤ 0,26 px). La signature disparaît de la silhouette et la
+  cape n'est plus froissée. **Reste un moignon** dans le dos : la partie de l'excroissance qui se
+  projette derrière la cape n'est pas observable depuis une seule vue. Une heuristique de retrait
+  « derrière la surface avant » troue la cape : abandonnée.
+- **Réglages qui comptent** : lisser la distance au masque et faire une découpe en max lisse (sinon le
+  contour en marches de pixels est extrudé en stries) ; paramétrisation lisse du changement de SDF
+  (sinon terrasses de voxels) ; plafond sur l'ajout de matière (sinon bulles, perles sur les cheveux).
+- **Finition** par déplacement de sommets plafonné à 3 px, avec pénalité des faces retournées : IoU
+  0,992 et 0,977, aucune face retournée. La pénalité seule, sans plafond, freine trop les grandes
+  corrections (IoU 0,994 → 0,970 pour 1,49 → 0,59 % de faces retournées).
+- **Coût** : 2 à 3 min par mesh sur la RTX 2000 Ada (moins de 1 Gio de VRAM), 10 à 25 min sur CPU en 256.
+- **Limites** : la grille lisse les détails plus fins qu'un voxel (mèches, visage) ; les parties cachées
+  ne sont pas contraintes ; sur `3dfab…`, la matière manquante au-delà de 4 voxels (jambes coupées par
+  le cadre, creux entre le bras et le corps) n'est pas recréée.
+
 ## Pistes non explorées
 
 - Détourage guidé (boîte ou points, par exemple SAM 2) pour garder les accessoires, ou birefnet en plus
