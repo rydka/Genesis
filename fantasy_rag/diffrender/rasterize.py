@@ -10,7 +10,8 @@ Two passes (written from general rasterization principles, see README for the so
    depth are recomputed with ordinary torch operations from the clip-space vertices of the winning
    triangle. Autograd then gives d(bary)/d(vertices) inside triangles.
 
-Gradients of the coverage itself (silhouettes) are not produced here: see `antialias`.
+Gradients of the coverage itself (silhouettes) are not produced here: see `edge_gradients`
+(micro-edges, image unchanged) and `antialias` (analytic edge antialiasing).
 """
 
 from dataclasses import dataclass
@@ -212,7 +213,8 @@ def rasterize(vertices_clip: torch.Tensor, faces: torch.Tensor, resolution: Reso
     cull_backfaces: drop triangles that are clockwise in NDC (OpenGL front = counter-clockwise).
 
     Triangles with a vertex behind the camera (w <= 0) are dropped (no near-plane clipping).
-    Only `bary` and `depth` carry gradients (w.r.t. vertices_clip); see `antialias` for silhouettes.
+    Only `bary` and `depth` carry gradients (w.r.t. vertices_clip); see `edge_gradients` or
+    `antialias` for silhouettes.
     """
     height, width = as_resolution(resolution)
     if vertices_clip.dim() == 2:

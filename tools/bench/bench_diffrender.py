@@ -10,8 +10,9 @@ CUDA while the lock exists. Nothing is written to disk; results are printed.
 Scene: a UV sphere with about --faces faces filling most of the image, i.e. a dense mesh with
 sub-pixel triangles as produced by the image-to-3D generators. Measured:
   - visibility only (rasterize under no_grad);
-  - a full optimisation step: rasterize + interpolate (normals, depth) + antialiased silhouette,
-    then backward to the vertex positions.
+  - a full optimisation step: rasterize + interpolate (normals, depth) + silhouette gradients
+    (--mode analytic: `antialias`; --mode micro_edge: `edge_gradients`, applied to the mask and to
+    the normal map), then backward to the vertex positions.
 """
 
 import argparse
@@ -27,7 +28,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from fantasy_rag.diffrender import (  # noqa: E402
-    Camera, antialias, interpolate, look_at, perspective, rasterize, uv_sphere, vertex_normals,
+    Camera, antialias, edge_gradients, interpolate, look_at, perspective, rasterize, uv_sphere,
+    vertex_normals,
 )
 
 
@@ -55,6 +57,7 @@ def main():
     parser.add_argument("--res", type=int, default=512)
     parser.add_argument("--max-fragments", type=int, default=1 << 22)
     parser.add_argument("--repeat", type=int, default=3)
+    parser.add_argument("--mode", choices=["analytic", "micro_edge"], default="analytic")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -82,7 +85,7 @@ def run(args, device):
     cam = Camera(look_at((0.3, 0.2, 2.6)), perspective(55.0), (args.res, args.res))
     mvp = cam.mvp.to(device)
     print(f"device={device} faces={f.shape[0]} vertices={v.shape[0]} res={args.res} "
-          f"max_fragments={args.max_fragments} torch={torch.__version__}")
+          f"max_fragments={args.max_fragments} mode={args.mode} torch={torch.__version__}")
 
     def to_clip(x):
         ones = torch.ones_like(x[:, :1])
@@ -97,7 +100,12 @@ def run(args, device):
         clip = to_clip(verts)
         rast = rasterize(clip, f, args.res, max_fragments=args.max_fragments)
         normals = interpolate(vertex_normals(verts, f), rast, f)
-        alpha = antialias(rast.mask.to(clip.dtype).unsqueeze(-1), rast, clip, f)
+        mask = rast.mask.to(clip.dtype).unsqueeze(-1)
+        if args.mode == "analytic":
+            alpha = antialias(mask, rast, clip, f)
+        else:
+            alpha = edge_gradients(mask, rast, clip, f)
+            normals = edge_gradients(normals, rast, clip, f)
         loss = alpha.mean() + rast.depth.mean() + normals.square().mean()
         loss.backward()
         return verts.grad

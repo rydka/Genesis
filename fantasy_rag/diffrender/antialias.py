@@ -22,15 +22,20 @@ from .rasterize import RasterOutput, pixel_centers_ndc, screen_barycentrics
 
 
 def _pairs(tid_flat: torch.Tensor, batch: int, height: int, width: int):
-    """Flat indices (with batch offset) of adjacent pixel pairs whose triangle ids differ."""
+    """Flat indices (with batch offset) of adjacent pixel pairs whose triangle ids differ.
+
+    Returns (a, b, horizontal): b is the right (horizontal pair) or lower (vertical pair) pixel.
+    """
     device = tid_flat.device
     grid = torch.arange(batch * height * width, device=device).view(batch, height, width)
     a_h, b_h = grid[:, :, :-1].reshape(-1), grid[:, :, 1:].reshape(-1)
     a_v, b_v = grid[:, :-1, :].reshape(-1), grid[:, 1:, :].reshape(-1)
     a = torch.cat([a_h, a_v])
     b = torch.cat([b_h, b_v])
+    horizontal = torch.cat([torch.ones_like(a_h, dtype=torch.bool),
+                            torch.zeros_like(a_v, dtype=torch.bool)])
     keep = tid_flat[a] != tid_flat[b]
-    return a[keep], b[keep]
+    return a[keep], b[keep], horizontal[keep]
 
 
 def antialias(color: torch.Tensor, rast: RasterOutput, vertices_clip: torch.Tensor,
@@ -51,7 +56,7 @@ def antialias(color: torch.Tensor, rast: RasterOutput, vertices_clip: torch.Tens
     depth = rast.depth.detach().reshape(-1)
     flat_color = color.reshape(-1, channels)
 
-    pa, pb = _pairs(tid, batch, height, width)
+    pa, pb, _ = _pairs(tid, batch, height, width)
     if pa.numel() == 0:
         return color
     ta, tb = tid[pa], tid[pb]

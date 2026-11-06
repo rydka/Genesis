@@ -13,6 +13,7 @@ from .camera import (
     perspective_from_intrinsics,
     transform_points,
 )
+from .edgegrad import edge_gradients
 from .mesh_ops import cube, face_normals, uv_sphere, vertex_normals
 from .rasterize import RasterOutput, face_attributes, interpolate, rasterize
 from .uv import (
@@ -25,7 +26,7 @@ from .uv import (
 
 __all__ = [
     "Camera", "RasterOutput", "antialias", "bake_face_attributes", "bake_from_view",
-    "bake_vertex_attributes", "crop_projection", "cube", "face_attributes", "face_normals",
-    "interpolate", "look_at", "perspective", "perspective_from_intrinsics", "rasterize",
-    "rasterize_uv", "transform_points", "uv_sphere", "uv_to_clip", "vertex_normals",
+    "bake_vertex_attributes", "crop_projection", "cube", "edge_gradients", "face_attributes",
+    "face_normals", "interpolate", "look_at", "perspective", "perspective_from_intrinsics",
+    "rasterize", "rasterize_uv", "transform_points", "uv_sphere", "uv_to_clip", "vertex_normals",
 ]

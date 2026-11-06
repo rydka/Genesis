@@ -62,13 +62,48 @@ plus petits qu'un pixel, et pas de transparence.
 
 | Priorité | Changement | Pourquoi |
 |---|---|---|
-| 1 | **Ajouter les gradients par micro-arêtes** (Pidhorskyi et al. 2024) comme mode de silhouette, en réécriture d'après l'article, avec un passage avant inchangé et un retour personnalisé (`torch.autograd.Function`). Garder l'anticrénelage actuel comme second mode. | Gradients nettement plus justes, image non modifiée (normales et profondeur intactes), auto-intersections gérées. Notre code a déjà l'énumération des paires de pixels voisins. Attention : l'article contient une incohérence de signe entre l'équation 11 et l'annexe (équation 26) à trancher par un test. |
-| 2 | **Test de justesse des gradients** contre une référence : couverture calculée par sur-échantillonnage fin, dérivée par différences finies, sur un triangle fin et sur un triangle plus petit qu'un pixel. DRTK (MIT) peut servir de référence externe en dehors du produit. | Les tests actuels vérifient la cohérence (gradcheck) et la convergence, pas l'erreur par rapport à la vraie dérivée de la couverture. C'est la mesure qu'utilise la littérature. |
+| 1 (fait) | **Ajouter les gradients par micro-arêtes** (Pidhorskyi et al. 2024) comme mode de silhouette, en réécriture d'après l'article, avec un passage avant inchangé et un retour personnalisé (`torch.autograd.Function`). Garder l'anticrénelage actuel comme second mode. | Gradients nettement plus justes, image non modifiée (normales et profondeur intactes), auto-intersections gérées. Notre code a déjà l'énumération des paires de pixels voisins. Attention : l'article contient une incohérence de signe entre l'équation 11 et l'annexe (équation 26) à trancher par un test. |
+| 2 (fait) | **Test de justesse des gradients** contre une référence : couverture calculée par sur-échantillonnage fin, dérivée par différences finies, sur un triangle fin et sur un triangle plus petit qu'un pixel. DRTK (MIT) peut servir de référence externe en dehors du produit. | Les tests actuels vérifient la cohérence (gradcheck) et la convergence, pas l'erreur par rapport à la vraie dérivée de la couverture. C'est la mesure qu'utilise la littérature. |
 | 3 | **Règle de dimensionnement** dans l'optimisation par zones : triangles d'au moins 1 à 2 pixels dans le recadrage, sinon sur-échantillonnage du rendu. | Contourne le défaut commun « arêtes manquées » et « triangles sous-pixel ». |
 | 4 | **Perte à longue portée** pour la phase de caméra (pyramide et carte de distance de la silhouette cible). | Gradients locaux sinon. |
 | 5 | Pas de rasterisation douce dans un premier temps. | Image modifiée et gradients biaisés ; seulement en secours si la phase grossière ne converge pas. |
 
 Ces recommandations relèvent de l'agent Intégrateur ; l'Évaluateur jugera le gain sur le banc d'essai.
+
+## Résultats de la mise en œuvre (2026-11-06)
+
+Les priorités 1 et 2 sont faites (`fantasy_rag/diffrender/edgegrad.py`, `reference.py` ; détail et
+tableaux dans `fantasy_rag/diffrender/README.md`, section « Justesse des gradients »). Ce qu'elles
+changent aux recommandations :
+
+- **Le signe est tranché** : l'équation 11, (I_A − I_B), est juste ; l'équation 26 de l'annexe
+  donne le gradient opposé (test contre différences finies d'une couverture sur-échantillonnée).
+- **Micro-arêtes par défaut**, y compris pour les masques : à 1 échantillon par pixel, erreur
+  relative du gradient de 0,8 % (arête diagonale) à 17 % (occultation), contre 6 % à 165 % pour
+  notre anticrénelage. L'ordre de grandeur rejoint celui de l'article (micro-arêtes 3 à 8 %,
+  nvdiffrast 39 à 69 %). L'anticrénelage reste disponible ; son image adoucie peut servir pour
+  un masque comparé à une cible douce.
+- **Notre anticrénelage est plus faux que prévu sur les diagonales** : le mélange additif des
+  quatre voisins compte une arête à 45° deux fois (erreur 99 %). Sa direction est bonne, ce qui
+  explique que les tests de convergence passaient.
+- **Deux écarts à l'article**, mesurés : (a) le report vers les sommets passe par le point de
+  l'arête traversée et non par le fragment au centre du pixel, sans quoi l'épaisseur d'un
+  triangle plus fin qu'un pixel n'a aucun gradient ; (b) aux intersections obliques, la dérivée
+  en profondeur est pondérée par n_x² ou n_y², sans quoi le déplacement de la ligne est compté
+  deux fois (mesuré : 2,0 fois à 45°). D'après notre lecture, l'équation 12 appliquée paire par
+  paire a ce défaut.
+- **La règle de dimensionnement (priorité 3) est confirmée et précisée** : il faut au moins deux
+  échantillons sur la largeur d'une structure. Une lame de 0,45 px n'est retrouvée (épaisseur à
+  0,003 px près) qu'avec un rendu à 4 × 4 échantillons par pixel ; à 1 échantillon par pixel,
+  les micro-arêtes la font disparaître (image binaire face à une cible douce) et l'anticrénelage
+  se trompe de 0,5 px. Un triangle qui ne couvre aucun centre d'échantillon reste invisible pour
+  les deux modes. Dans l'optimisation par zones : recadrage assez fin pour que les structures
+  visées fassent au moins deux pixels, sinon rendu sur-échantillonné × 4 puis moyenne.
+- Coût : identique pour les deux modes sur CPU (490 ms contre 504 ms par étape, 1 million de
+  faces en 512²). Mesure GPU reportée (verrou pris).
+
+Priorités suivantes inchangées : perte à longue portée pour la phase de caméra (4), pas de
+rasterisation douce (5).
 
 ## Sources
 

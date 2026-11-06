@@ -12,6 +12,8 @@ from fantasy_rag.diffrender import (
     bake_face_attributes,
     bake_from_view,
     cube,
+    edge_gradients,
+    face_attributes,
     interpolate,
     look_at,
     perspective,
@@ -22,6 +24,7 @@ from fantasy_rag.diffrender import (
     uv_sphere,
     vertex_normals,
 )
+from fantasy_rag.diffrender import edgegrad, reference
 
 F64 = torch.float64
 
@@ -245,15 +248,20 @@ class TestGradients:
 
 # ---------------------------------------------------------------- image-based optimisation
 
-def _silhouette(vertices, faces, cam):
+def _silhouette(vertices, faces, cam, mode="analytic"):
     clip = cam.to_clip(vertices)
     rast = rasterize(clip, faces, cam.resolution)
-    alpha = antialias(rast.mask.to(clip.dtype).unsqueeze(-1), rast, clip, faces)
+    mask = rast.mask.to(clip.dtype).unsqueeze(-1)
+    if mode == "analytic":
+        alpha = antialias(mask, rast, clip, faces)
+    else:
+        alpha = edge_gradients(mask, rast, clip, faces)
     return alpha[..., 0]
 
 
+@pytest.mark.parametrize("mode", ["analytic", "micro_edge"])
 @pytest.mark.parametrize("shape", ["sphere", "cube"])
-def test_recover_translation_from_silhouettes(shape):
+def test_recover_translation_from_silhouettes(shape, mode):
     torch.manual_seed(0)
     if shape == "sphere":
         v, f = uv_sphere(12, 24, radius=0.6)
@@ -262,14 +270,15 @@ def test_recover_translation_from_silhouettes(shape):
     cams = [Camera(look_at(eye), perspective(45.0), (48, 48))
             for eye in [(0.0, 0.0, 3.5), (3.5, 0.0, 0.0), (0.0, 3.5, 0.01)]]
     true_offset = torch.tensor([0.25, -0.15, 0.2])
-    targets = [_silhouette(v + true_offset, f, c).detach() for c in cams]
+    targets = [_silhouette(v + true_offset, f, c, mode).detach() for c in cams]
 
     offset = torch.zeros(3, requires_grad=True)
     opt = torch.optim.Adam([offset], lr=0.02)
     losses = []
     for _ in range(150):
         opt.zero_grad()
-        loss = sum(((_silhouette(v + offset, f, c) - t) ** 2).mean() for c, t in zip(cams, targets))
+        loss = sum(((_silhouette(v + offset, f, c, mode) - t) ** 2).mean()
+                   for c, t in zip(cams, targets))
         loss.backward()
         opt.step()
         losses.append(float(loss))
@@ -277,24 +286,187 @@ def test_recover_translation_from_silhouettes(shape):
     assert (offset.detach() - true_offset).abs().max() < 0.03
 
 
-def test_vertex_level_optimisation_decreases_loss():
+@pytest.mark.parametrize("mode", ["analytic", "micro_edge"])
+def test_vertex_level_optimisation_decreases_loss(mode):
     # Free vertices of a sphere pulled towards a larger sphere's silhouette
     v, f = uv_sphere(10, 20, radius=0.5)
     cams = [Camera(look_at(eye), perspective(45.0), (40, 40))
             for eye in [(0.0, 0.0, 3.0), (3.0, 0.0, 0.0), (0.0, 3.0, 0.01), (-2.1, 0.0, -2.1)]]
-    targets = [_silhouette(v * 1.3, f, c).detach() for c in cams]
+    targets = [_silhouette(v * 1.3, f, c, mode).detach() for c in cams]
     delta = torch.zeros_like(v, requires_grad=True)
     opt = torch.optim.Adam([delta], lr=0.005)
     losses = []
     for _ in range(80):
         opt.zero_grad()
-        loss = sum(((_silhouette(v + delta, f, c) - t) ** 2).mean() for c, t in zip(cams, targets))
+        loss = sum(((_silhouette(v + delta, f, c, mode) - t) ** 2).mean()
+                   for c, t in zip(cams, targets))
         loss.backward()
         opt.step()
         losses.append(float(loss))
     assert losses[-1] < 0.3 * losses[0]
     radius = (v + delta).detach().norm(dim=1).mean()
     assert abs(float(radius) - 0.65) < 0.05
+
+
+# ---------------------------------------------------------------- micro-edges
+
+class TestMicroEdges:
+    def test_forward_is_identity_and_image_gradient_passes_through(self):
+        clip, faces = _scene64()
+        clip = clip.clone().requires_grad_()
+        rast = rasterize(clip, faces, 12)
+        normals = interpolate(torch.randn(6, 3, dtype=F64), rast, faces).detach().requires_grad_()
+        out = edge_gradients(normals, rast, clip, faces)
+        assert torch.equal(out, normals)
+        g = torch.randn_like(out)
+        (out * g).sum().backward()
+        assert torch.equal(normals.grad, g)
+        assert clip.grad.abs().sum() > 0
+
+    def test_batch_matches_single_views(self):
+        v, f = uv_sphere(8, 16, radius=0.7)
+        cams = [Camera(look_at(eye, dtype=F64), perspective(45.0, dtype=F64), (24, 24))
+                for eye in [(0.0, 0.0, 3.0), (2.0, 0.5, 2.0)]]
+        v = v.to(F64)
+        grads = []
+        for cam in cams:
+            x = v.clone().requires_grad_()
+            clip = cam.to_clip(x)
+            rast = rasterize(clip, f, 24)
+            edge_gradients(rast.mask.to(F64).unsqueeze(-1), rast, clip, f).sum().backward()
+            grads.append(x.grad)
+        x = v.clone().requires_grad_()
+        clip = torch.stack([c.to_clip(x) for c in cams])
+        rast = rasterize(clip, f, 24)
+        edge_gradients(rast.mask.to(F64).unsqueeze(-1), rast, clip, f).sum().backward()
+        assert grads[0].abs().sum() > 0
+        assert torch.allclose(x.grad, grads[0] + grads[1])
+
+    def test_sign_of_eq11_against_finite_differences(self, monkeypatch):
+        # Settles the sign disagreement in Pidhorskyi et al.: eq. 11 has (I_A - I_B), the
+        # supplementary eq. 26 has (I_B - I_A). Only eq. 11 matches the supersampled reference.
+        scene = reference.scenes()["diagonal_edge"]
+        ref = reference.reference_gradient(scene, supersample=64)
+        assert reference.relative_error(reference.method_gradient(scene, "micro_edge"), ref) < 0.03
+        monkeypatch.setattr(edgegrad, "_EQ11_SIGN", -1.0)
+        flipped = reference.method_gradient(scene, "micro_edge")
+        assert reference.relative_error(flipped, ref) > 1.9
+        assert float((flipped * ref).sum()) < 0
+
+    def test_intersection_matches_eq12(self):
+        # Two screen-filling planes z = a x + c meeting along a vertical line; translating the
+        # "varying" plane along its unit normal (x-z plane) moves the line by eq. 12 of the paper:
+        # dp/dr = -n_f.z / (n_f^T [[0, 1], [-1, 0]] n_v), vectors written (x, z).
+        a_f, c_f, a_v, c_v = 0.35, 0.05, -0.25, 0.1
+        pts = [(-3.0, -3.0), (3.0, -3.0), (0.0, 3.0)]
+        rows = ([[x, y, a_f * x + c_f, 1.0] for x, y in pts]
+                + [[x, y, a_v * x + c_v, 1.0] for x, y in pts])
+        clip = torch.tensor(rows, dtype=F64, requires_grad=True)
+        faces = torch.tensor([[0, 1, 2], [3, 4, 5]])
+        h = w = 16
+        rast = rasterize(clip, faces, (h, w))
+        values = torch.tensor([[1.0], [0.0]], dtype=F64)
+        edge_gradients(face_attributes(values, rast), rast, clip, faces).sum().backward()
+        n_f = torch.tensor([-a_f, 1.0], dtype=F64) / math.hypot(a_f, 1.0)
+        n_v = torch.tensor([-a_v, 1.0], dtype=F64) / math.hypot(a_v, 1.0)
+        rot = torch.tensor([[0.0, 1.0], [-1.0, 0.0]], dtype=F64)
+        dp_dr = float(-n_f[1] / (n_f @ rot @ n_v))                # NDC per unit of translation
+        # L = number of pixels showing face 0 (value 1). Face 0 is in front (smaller z) left of
+        # the line, so L grows by H pixels per pixel of motion of the line towards +x.
+        expected = h * dp_dr * (w / 2.0)
+        direction = torch.zeros(6, 4, dtype=F64)
+        direction[3:, 0], direction[3:, 2] = n_v[0], n_v[1]
+        got = float((clip.grad * direction).sum())
+        assert abs(expected) > 1.0
+        assert got == pytest.approx(expected, rel=1e-6)
+
+    def test_edge_scatter_is_independent_per_edge(self):
+        # A blade thinner than a pixel: the micro-edge gradient of its width must not cancel
+        # (it does with the paper's fragment scattering, by construction).
+        x0 = torch.tensor(0.37, dtype=F64)
+        width = torch.tensor(0.45, dtype=F64, requires_grad=True)
+        grads = {}
+        for scatter in ("edge", "fragment"):
+            width.grad = None
+            clip = reference.blade_vertices(x0, width, 32)
+            rast = rasterize(clip, reference.BLADE_FACES, 32)
+            mask = rast.mask.to(F64).unsqueeze(-1)
+            edge_gradients(mask, rast, clip, reference.BLADE_FACES,
+                           scatter=scatter).sum().backward()
+            grads[scatter] = float(width.grad)
+        assert grads["edge"] > 1.0                      # wider blade, more covered pixels
+        assert abs(grads["fragment"]) < 1e-9
+
+
+# ---------------------------------------------------------------- accuracy against a reference
+
+@pytest.fixture(scope="module")
+def references():
+    return {name: reference.reference_gradient(scene, supersample=64)
+            for name, scene in reference.scenes().items()}
+
+
+# (case, mode, supersample, bound): relative error of the gradient below `bound`.
+# Measured values are in the README table; bounds leave a margin.
+_ACCURATE = [
+    ("vertical_edge", "analytic", 1, 0.1), ("vertical_edge", "micro_edge", 1, 0.05),
+    ("diagonal_edge", "micro_edge", 1, 0.03), ("occlusion", "micro_edge", 1, 0.25),
+    ("intersection", "micro_edge", 1, 0.2),
+    ("vertical_edge", "micro_edge", 4, 0.05), ("diagonal_edge", "micro_edge", 4, 0.03),
+    ("thin_blade", "micro_edge", 4, 0.25), ("subpixel", "micro_edge", 4, 0.25),
+    ("subpixel_no_centre", "micro_edge", 4, 0.25), ("occlusion", "micro_edge", 4, 0.12),
+    ("intersection", "micro_edge", 4, 0.06),
+]
+
+
+@pytest.mark.parametrize("case,mode,supersample,bound", _ACCURATE)
+def test_gradient_accuracy(references, case, mode, supersample, bound):
+    scene = reference.scenes()[case]
+    err = reference.relative_error(reference.method_gradient(scene, mode, supersample),
+                                   references[case])
+    assert err < bound
+
+
+# Known failures, kept as tests so that they stay documented (README, "Justesse des gradients").
+_FAILURES = [
+    # analytic: the four-neighbour additive blend counts a diagonal edge on both axes (about 2x)
+    ("diagonal_edge", "analytic", 1, 0.5),
+    ("thin_blade", "analytic", 1, 1.0), ("subpixel", "analytic", 1, 1.0),
+    ("occlusion", "analytic", 1, 1.0),
+    # analytic: no depth gradient at all, intersection lines are not edges for it
+    ("intersection", "analytic", 1, 1.0),
+    # micro-edges at 1 sample per pixel: only rows whose centre is covered see the blade
+    ("thin_blade", "micro_edge", 1, 0.25), ("subpixel", "micro_edge", 1, 0.5),
+    # no pixel centre covered: the triangle is invisible, no gradient in either mode
+    ("subpixel_no_centre", "analytic", 1, 0.999), ("subpixel_no_centre", "micro_edge", 1, 0.999),
+]
+
+
+@pytest.mark.parametrize("case,mode,supersample,above", _FAILURES)
+def test_gradient_known_failures(references, case, mode, supersample, above):
+    scene = reference.scenes()[case]
+    err = reference.relative_error(reference.method_gradient(scene, mode, supersample),
+                                   references[case])
+    assert err > above
+
+
+@pytest.mark.parametrize("mode,supersample,max_width_error", [
+    ("micro_edge", 4, 0.02), ("analytic", 4, 0.1),
+])
+def test_recover_thin_blade(mode, supersample, max_width_error):
+    # Blade 0.45 px wide, started 0.73 px off and 0.85 px too wide
+    r = reference.blade_fit(mode, supersample)
+    assert r["x0_error_px"] < 0.02
+    assert r["width_error_px"] < max_width_error
+    assert r["loss_last"] < 0.01 * r["loss_first"]
+
+
+def test_thin_blade_collapses_without_supersampling():
+    # Documented failure: the hard forward image of micro-edges against a soft target shrinks a
+    # structure thinner than a pixel until it disappears; render at 4 samples per pixel instead.
+    r = reference.blade_fit("micro_edge", 1)
+    assert r["x0_error_px"] < 0.05
+    assert r["width"] < 0.1
 
 
 # ---------------------------------------------------------------- UV space
