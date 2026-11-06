@@ -152,3 +152,39 @@ def test_finish_in_contour_band_leaves_the_inside_exact(finish):
     assert all(tuple(p) in new for p in verts[torch.from_numpy(inside)].numpy().tolist())
     sil_out = fs.hard_silhouette(v, f, cam, hw, hw)
     assert fs.iou(sil_out, target) > fs.iou(sil_in, target) + 0.02
+
+
+@pytest.mark.parametrize("direction,w_normal", [("normal", 0.0), ("plane", 0.0), ("normal", 1.0)])
+def test_largesteps_finish_keeps_the_inside_and_grows_the_contour(direction, w_normal):
+    fit = pytest.importorskip("tools.bench.fit_flexicubes")
+    fs = fit.fs
+    verts, faces = uv_sphere(32, 64, radius=0.6)
+    big_v, big_f = uv_sphere(32, 64, radius=0.66)
+    hw = (96, 128)
+    cam = fs.OrthoCamera("+z", 0.6, 0.62, 0.5, (0.0, 0.0, 0.0))
+    target = fs.hard_silhouette(big_v, big_f, cam, hw, hw)
+    alpha = target.astype(np.float32)
+    sdf_full = fs.signed_distance(target)
+    sil_in = fs.hard_silhouette(verts, faces, cam, hw, hw)
+    band = fit.contour_band_weight(sil_in, target, fit.ContourBand(6.0, 3.0))
+    inside = (fit.vertex_weight(verts, cam, band) <= 1e-3)
+    cfg = fit.LargeStepsConfig(levels=((128, 2, 40),), max_disp_px=4.0, direction=direction,
+                               w_normal=w_normal, log_every=1000)
+    v, info = fit.largesteps_finish(verts, faces, alpha, sdf_full, cam, fs._zscale(verts), cfg, None,
+                                    [], log=lambda *_: None, band_img=band)
+    assert v.shape == verts.shape and info["free_vertices"] == int((~inside).sum())
+    assert torch.equal(v[inside], verts[inside])                 # frozen inside, bit-exact
+    # motion stays in the image plane (the camera looks along z)
+    assert float((v - verts)[:, 2].abs().max()) < 1e-6
+    sil_out = fs.hard_silhouette(v, faces, cam, hw, hw)
+    assert fs.iou(sil_out, target) > fs.iou(sil_in, target) + 0.02
+    assert fs.flipped_faces(verts, v, faces)[0] == 0
+
+
+def test_face_pairs_of_a_closed_mesh():
+    fit = pytest.importorskip("tools.bench.fit_flexicubes")
+    verts, faces = uv_sphere(8, 16, radius=1.0)
+    pairs = fit._face_pairs(faces)
+    # every pair shares exactly two vertices
+    shared = [len(set(faces[a].tolist()) & set(faces[b].tolist())) for a, b in pairs.tolist()]
+    assert set(shared) == {2} and len(pairs) > len(faces)

@@ -48,7 +48,13 @@ needs a representation that changes topology (docs/conception/optimisation-par-z
      weight: the differences outside the regions pull nothing;
   4b. connected components smaller than 1 % of the largest are dropped (tips of strands left
      floating when their middle was removed);
-  5. finishing pass on the FlexiCubes mesh (remesh_finish): in-plane vertex steps along the in-plane
+  5. finishing pass on the FlexiCubes mesh. Default since campaign v3c (--finish largesteps,
+     largesteps_finish): fixed connectivity, displacement along the in-plane part of the smoothed start
+     normal, preconditioned by (I + 19 L)^-1 on the free vertices (Nicolet, Jacobson, Jakob 2021,
+     "Large Steps in Inverse Rendering of Geometry", ACM TOG 40(6), DOI 10.1145/3478513.3480501;
+     own implementation, scipy factorisation, no dependency) with UniformAdam, plus a term on the change
+     of the angle between adjacent faces (relative flattening loss, Liu et al. 2019, Soft Rasterizer,
+     arXiv 1901.05567), area-weighted, weight 10. --finish remesh (v3, v3b, remesh_finish): in-plane
      part of the normal, smoothed, Adam with a uniform denominator, Laplacian of the displacement
      field, cap of 8 px, and continuous remeshing at every iteration (Palfinger 2022, "Continuous
      Remeshing for Inverse Rendering", CAVW 33(5), DOI 10.1002/cav.2101; vendored code in
@@ -56,7 +62,7 @@ needs a representation that changes topology (docs/conception/optimisation-par-z
      workshop L3D-IVU, "Black-Box Test-Time Shape REFINEment") found that silhouette-only refinement
      degenerates without displacement and smoothness regularisers. --finish vertex: the former
      fit_silhouette displacements (fixed connectivity, cap 3 px, flipped-face penalty).
-     Since campaign v3b both are further restricted to a contour band (ContourBand): only the
+     Since campaign v3b all finishing passes are restricted to a contour band (ContourBand): only the
      vertices projected within --finish-contour-px (8) of the boundary of the FlexiCubes silhouette or
      of the target move or get remeshed, with a smooth fall-off; the inside of the silhouette stays the
      FlexiCubes surface exactly (measure frozen_max_dev_px). --finish-contour-px 0: former behaviour;
@@ -68,7 +74,7 @@ needs a representation that changes topology (docs/conception/optimisation-par-z
 Usage (from the repository root; outputs go under data/, never in git):
     .venv\\Scripts\\python.exe tools/bench/fit_flexicubes.py --mesh M.glb --mask RAW_ALPHA.png
         [--refined-mask REFINED.png] [--target refined|raw] [--carve detached|regions|none]
-        [--finish remesh|vertex|none] [--finish-contour-px 8] [--all-errors] [--image SOURCE.jpg]
+        [--finish largesteps|remesh|vertex|none] [--finish-w-normal 10] [--finish-contour-px 8] [--all-errors] [--image SOURCE.jpg]
         [--camera data/bench/<date>_fit-silhouette/<stem>/camera.json]
         --out data/bench/<date>_fit-flexicubes/<stem> [--device cpu|cuda|auto] [--res 128] [--blender]
 
@@ -77,7 +83,8 @@ Usage (from the repository root; outputs go under data/, never in git):
 
 --device cuda/auto take the GPU lock of the main repository (tools/bench/gpu_lock.py) and fall back
 to the CPU when another job holds it. The script is resumable: the SDF grid, the FlexiCubes mesh and
-the finished mesh (flexicubes_remesh.glb, or flexicubes_finish.glb with --finish vertex) are cached
+the finished mesh (flexicubes_largesteps.glb, flexicubes_remesh.glb, or flexicubes_finish.glb with
+--finish vertex) are cached
 in the output folder, and a finished run (summary.json) is skipped
 unless --force.
 """
@@ -820,6 +827,245 @@ def remesh_finish(verts: torch.Tensor, faces: torch.Tensor, alpha_full: np.ndarr
     return etc[:, P].clone(), f, info
 
 
+# --------------------------------------------------------------------------------------------------
+# Finishing pass: Large Steps (fixed connectivity)
+# --------------------------------------------------------------------------------------------------
+
+@dataclass
+class LargeStepsConfig:
+    """Finishing pass on the fixed FlexiCubes connectivity, preconditioned as in Nicolet, Jacobson,
+    Jakob 2021 ("Large Steps in Inverse Rendering of Geometry", ACM TOG 40(6), DOI
+    10.1145/3478513.3480501): the displacement is x - x0 = W P (I + lam L)^-1 u, with L the
+    combinatorial Laplacian of the free vertices (frozen neighbours act as a zero boundary: Dirichlet),
+    W the band x region weight of each vertex and P the allowed direction; u is optimised with their
+    UniformAdam (one denominator, the largest second moment). The paper shows that silhouette
+    gradients are sparse and large, that following them tangles the mesh, and that the Laplacian
+    regulariser (or local neighbour averaging, as in remesh_finish) only spreads them over a 1-ring
+    per step (Jacobi-like); the inverse (I + lam L) spreads each step over the whole free region.
+    Transposition to our case (not established by the paper): one view only, a thin contour band with
+    a frozen inside, no remeshing (the remeshing of remesh_finish is a suspect of the crumpling).
+
+    `direction`: "normal" (default) moves each vertex along the fixed image-plane part of its start
+    normal, smoothed over `normal_smooth_iters` rings (one scalar per vertex: the contour moves across
+    itself, no tangential sliding; faces seen from the front, whose normal has no in-plane part, do not
+    move); "plane": free in-plane motion (two components).
+    `w_normal`: weight of a normal-consistency term on the change of the cosine between the normals of
+    adjacent faces, relative to the start mesh (the flattening loss of Liu et al. 2019, Soft Rasterizer,
+    arXiv 1901.05567, made relative so that the details of the start mesh are kept), averaged with the
+    area of the smaller face of each pair. 0 = off. Default 10 (campaign v3c: Large Steps alone, any
+    lambda or direction, crumpled the strand of 1464 and the knife hand as the remeshing did; this
+    term is what removes it, at the cost of part of the IoU gain).
+    `early_stop`: stop when the loss decreased by less than this fraction over `early_window`
+    iterations (0 = off)."""
+    levels: Sequence[Tuple[int, int, int]] = ((512, 2, 150),)
+    lr_px: float = 1.0                  # largest step on u, pixels of the full target
+    lam: float = 19.0                   # diffusion time (paper: 19 for most shapes, 99 single view)
+    betas: Tuple[float, float] = (0.9, 0.999)
+    direction: str = "normal"
+    normal_smooth_iters: int = 8
+    w_normal: float = 10.0
+    normal_area_weight: bool = True     # pairs weighted by the smaller face area (False: plain mean)
+    # True: the displacement is also multiplied by the band x region weight (smooth fall-off of the
+    # band); False: weight 1 on every free vertex, the fall-off is left to the Dirichlet boundary of
+    # (I + lam L)^-1 alone
+    taper: bool = True
+    max_disp_px: float = 8.0
+    w_sdf: float = 0.5
+    w_l2: float = 1.0
+    min_weight: float = 1e-3
+    early_stop: float = 0.0
+    early_window: int = 20
+    log_every: int = 10
+
+
+def _laplacian_solver(faces: np.ndarray, free: np.ndarray, lam: float):
+    """Factorised (I + lam L_ff) on the free vertices, L the combinatorial Laplacian of the whole
+    mesh (degree counted over all neighbours: frozen ones are a zero Dirichlet boundary). Returns
+    (solve, index of the free vertices); solve maps [n_free, k] to [n_free, k]."""
+    from scipy.sparse import coo_matrix, diags, identity
+    from scipy.sparse.linalg import factorized
+    n = int(free.shape[0])
+    e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    e = np.unique(np.sort(e, axis=1), axis=0)
+    adj = coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(n, n)).tocsr()
+    adj = adj + adj.T
+    deg = np.asarray(adj.sum(1)).ravel()
+    idx = np.nonzero(free)[0]
+    a_ff = adj[idx][:, idx]
+    m = (identity(len(idx)) + lam * (diags(deg[idx]) - a_ff)).tocsc()
+    lu = factorized(m)
+
+    def solve(b: np.ndarray) -> np.ndarray:
+        b = np.asarray(b, np.float64)
+        return np.stack([lu(b[:, k]) for k in range(b.shape[1])], 1)
+    return solve, idx
+
+
+def _face_pairs(faces: torch.Tensor) -> torch.Tensor:
+    """[P, 2] indices of the faces sharing an edge (manifold edges only)."""
+    f = faces.cpu().numpy()
+    e = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
+    e = np.sort(e, axis=1)
+    fid = np.tile(np.arange(len(f)), 3)
+    key = e[:, 0].astype(np.int64) * (int(f.max()) + 1) + e[:, 1]
+    _, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
+    two = counts[inv] == 2                                 # edges shared by exactly two faces
+    order = np.argsort(inv[two], kind="stable")
+    fid = fid[two][order]
+    return torch.from_numpy(np.stack([fid[0::2], fid[1::2]], 1)).to(faces.device)
+
+
+def largesteps_finish(verts: torch.Tensor, faces: torch.Tensor, alpha_full: np.ndarray,
+                      sdf_full: np.ndarray, cam: fs.OrthoCamera, zscale: float, cfg: LargeStepsConfig,
+                      weight_img: Optional[np.ndarray], history: List[dict], log,
+                      time_budget_s: Optional[float] = None, band_img: Optional[np.ndarray] = None
+                      ) -> Tuple[torch.Tensor, dict]:
+    """Optimise the vertices of (verts, faces) against the silhouette, Large Steps preconditioning
+    (LargeStepsConfig), fixed connectivity. Silhouette losses weighted per pixel by `weight_img`
+    (None = 1); vertices of band x region weight at most `min_weight` are frozen exactly.
+    Returns (verts, info)."""
+    from fantasy_rag.diffrender.remeshing import calc_edges, calc_vertex_normals
+    device = verts.device
+    H, W = alpha_full.shape
+    with torch.no_grad():
+        p = fs.CameraParams(cam).to(device)
+        rot, scale, center = p.rot(), p.log_scale.exp(), p.center.clone()
+        view = rot[2] / rot[2].norm()
+    w0 = vertex_weight(verts, cam, weight_img, band_img)
+    if w0 is None:
+        w0 = torch.ones(verts.shape[0], device=device)
+    free = (w0 > cfg.min_weight).cpu().numpy()
+    px = float(scale) * H
+    cap = cfg.max_disp_px / px
+    x0 = verts.detach().clone()
+    t_fac = time.perf_counter()
+    solve, idx_np = _laplacian_solver(faces.cpu().numpy(), free, cfg.lam)
+    t_fac = time.perf_counter() - t_fac
+    idx = torch.from_numpy(idx_np).to(device)
+    wf = w0[idx][:, None] if cfg.taper else torch.ones(idx.numel(), 1, device=device)
+    # direction: fixed in-plane part of the smoothed start normal, or the image plane
+    with torch.no_grad():
+        e = calc_edges(faces)[0]
+        e2 = torch.cat([e, e.flip(1)])
+        deg = torch.bincount(e2[:, 0], minlength=verts.shape[0]).clamp(min=1).to(verts.dtype)
+        vn = calc_vertex_normals(x0, faces)
+        for _ in range(cfg.normal_smooth_iters):
+            vn = 0.5 * (vn + _neighbour_mean(vn, e2, deg))
+        vn = vn / vn.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        npl = (vn - (vn @ view)[:, None] * view)[idx]          # length <= 1
+    if cfg.direction == "normal":
+        k = 1
+        def lift(s):                                          # [nf, 1] -> [nf, 3]
+            return s * npl
+        def reduce(g):                                        # [nf, 3] -> [nf, 1]
+            return (g * npl).sum(1, keepdim=True)
+    elif cfg.direction == "plane":
+        k = 3
+        def lift(s):
+            return s - (s @ view)[:, None] * view
+        reduce = lift
+    else:
+        raise ValueError(f"unknown direction {cfg.direction!r}")
+    pairs = _face_pairs(faces) if cfg.w_normal > 0 else None
+    if pairs is not None:
+        # only the pairs that touch a free vertex can change
+        fr = torch.from_numpy(free).to(device)
+        touch = fr[faces[pairs[:, 0]]].any(1) | fr[faces[pairs[:, 1]]].any(1)
+        pairs = pairs[touch]
+        with torch.no_grad():
+            fn0 = face_normals(x0, faces)
+            cos0 = (fn0[pairs[:, 0]] * fn0[pairs[:, 1]]).sum(1)
+            # area weights: the normal of a sliver face (FlexiCubes makes some) turns a lot for a
+            # tiny move, and its gradient, up to 100 times the median, would set the uniform Adam
+            # denominator of the whole mesh (campaign v3c)
+            area = face_normals(x0, faces, normalize=False).norm(dim=1)
+            pair_w = torch.minimum(area[pairs[:, 0]], area[pairs[:, 1]]) if cfg.normal_area_weight                 else torch.ones(pairs.shape[0], device=device)
+            pair_w = pair_w / pair_w.sum()
+
+    u = torch.zeros(idx.numel(), k, device=device)
+    m1 = torch.zeros_like(u)
+    m2 = torch.zeros_like(u)
+    b1, b2 = cfg.betas
+    t_step = 0
+
+    def to_t(a):
+        return torch.from_numpy(a).to(device=device, dtype=torch.float32)
+
+    def displacement(u):
+        d = wf * lift(to_t(solve(u.cpu().numpy())))
+        n = d.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        return d * (cap / n).clamp(max=1.0)
+
+    log(f"  large steps finish: {verts.shape[0]} vertices, {idx.numel()} free, lambda {cfg.lam:g}, "
+        f"direction {cfg.direction}, w_normal {cfg.w_normal:g}, cap {cfg.max_disp_px:g} px "
+        f"(factorisation {t_fac:.1f} s)")
+    t0 = time.perf_counter()
+    stop = False
+    n_it = 0
+    losses: List[float] = []
+    x = x0.clone()
+    for long_side, ss, iters in cfg.levels:
+        hw = fs.level_size((H, W), long_side)
+        tgt = fs.Target.make(alpha_full, sdf_full, hw, device)
+        w_px = (torch.tensor(fs.resample(weight_img, hw), device=device) if weight_img is not None
+                else None)
+        for it in range(iters):
+            v = x.clone().requires_grad_(True)
+            clip = fs.to_clip(v @ rot.T, scale, center, W / H, zscale)
+            alpha = fs.render_alpha(clip, faces, hw, ss)
+            if w_px is None:
+                l_sdf, l_l2 = fs.silhouette_losses(alpha, tgt)
+            else:
+                l_sdf = (w_px * alpha * tgt.sdf).mean()
+                l_l2 = (w_px * (alpha - tgt.alpha) ** 2).mean()
+            loss = cfg.w_sdf * l_sdf + cfg.w_l2 * l_l2
+            l_n = torch.zeros((), device=device)
+            if pairs is not None:
+                fn = face_normals(v, faces)
+                l_n = (pair_w * ((fn[pairs[:, 0]] * fn[pairs[:, 1]]).sum(1) - cos0).pow(2)).sum()
+                loss = loss + cfg.w_normal * l_n
+            loss.backward()
+            with torch.no_grad():
+                # gradient w.r.t. u: (I + lam L)^-1 (W P)^T dLoss/dx (the matrix is symmetric)
+                g = to_t(solve(reduce(wf * v.grad[idx]).cpu().numpy()))
+                t_step += 1
+                m1 = b1 * m1 + (1 - b1) * g
+                m2 = b2 * m2 + (1 - b2) * g * g
+                m_hat = m1 / (1 - b1 ** t_step)
+                v_max = (m2.max() / (1 - b2 ** t_step)).sqrt().clamp(min=1e-30)
+                u = u - (cfg.lr_px / px) * m_hat / v_max
+                x = x0.clone()
+                x[idx] = x0[idx] + displacement(u)
+            n_it += 1
+            rec = {"phase": "largesteps", "level": long_side, "iter": it, "loss": float(loss),
+                   "sdf": float(l_sdf), "l2": float(l_l2), "normal": float(l_n)}
+            history.append(rec)
+            losses.append(rec["loss"])
+            if it % cfg.log_every == 0 or it == iters - 1:
+                dmax = float((x - x0).norm(dim=1).max())
+                log(f"  largesteps {long_side}x{ss} it {it:3d}: loss {rec['loss']:.5f} l2 {rec['l2']:.5f} "
+                    f"sdf {rec['sdf']:.5f} normal {rec['normal']:.2e} max|d| {dmax * px:.1f} px "
+                    f"({time.perf_counter() - t0:.0f} s)")
+            if (cfg.early_stop > 0 and len(losses) > cfg.early_window
+                    and losses[-cfg.early_window - 1] - losses[-1]
+                    < cfg.early_stop * abs(losses[-cfg.early_window - 1])):
+                log(f"  early stop at iteration {it}: loss gain below {cfg.early_stop:g} over "
+                    f"{cfg.early_window} iterations")
+                stop = True
+                break
+            if time_budget_s and time.perf_counter() - t0 > time_budget_s:
+                log(f"  time budget of {time_budget_s:.0f} s reached, stopping")
+                stop = True
+                break
+        if stop:
+            break
+    disp = (x - x0).norm(dim=1) * px
+    info = {"iterations": n_it, "free_vertices": int(idx.numel()), "factorisation_s": round(t_fac, 2),
+            "seconds": round(time.perf_counter() - t0, 1), "displacement_max_px": float(disp.max()),
+            "displacement_mean_px": float(disp.mean())}
+    return x, info
+
+
 def flipped_against(ref_v: np.ndarray, ref_f: np.ndarray, verts: np.ndarray, faces: np.ndarray
                     ) -> Tuple[int, float]:
     """(number, area fraction) of faces whose normal points against the normal of the closest face
@@ -1141,6 +1387,22 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
             fs.export_glb(v_fin.numpy(), f_fin.numpy(), fin_glb)
             timings["finish_s"] = round(time.perf_counter() - t0, 1)
         stages[fin_name] = (v_fin, f_fin)
+    elif isinstance(finish_cfg, LargeStepsConfig):
+        fin_name = "flexicubes_largesteps"
+        fin_glb = out / f"{fin_name}.glb"
+        t0 = time.perf_counter()
+        if fin_glb.exists() and not force:
+            v_fin = torch.from_numpy(fs.load_mesh(fin_glb)[0])
+            log(f"finished mesh loaded from {fin_glb}")
+        else:
+            log("finishing pass (Large Steps, fixed connectivity)")
+            v_fin, finish_info = largesteps_finish(
+                v_fc.to(device), f_fc.to(device), alpha_full, sdf_full, cam, zscale, finish_cfg,
+                regions.w_opt if regions is not None else None, history, log, finish_budget_s, band_img)
+            v_fin = v_fin.cpu()
+            fs.export_glb(v_fin.numpy(), f_fc.numpy(), fin_glb)
+            timings["finish_s"] = round(time.perf_counter() - t0, 1)
+        stages[fin_name] = (v_fin, f_fc)
     elif finish_cfg is not None:
         fin_name = "flexicubes_finish"
         fin_glb = out / f"{fin_name}.glb"
@@ -1179,13 +1441,13 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         n, a = flipped_against(v_fc.numpy(), f_fc.numpy(), v_fin.numpy(), f_fin.numpy())
         metrics[fin_name].update({"flipped_faces": n, "flipped_faces_fraction": n / len(f_fin),
                                   "flipped_area_fraction": a, **finish_info})
-    if fin_name == "flexicubes_finish":
-        n, a = fs.flipped_faces(v_fc, stages["flexicubes_finish"][0], f_fc)
-        metrics["flexicubes_finish"].update({"flipped_faces": n, "flipped_faces_fraction": n / len(f_fc),
-                                             "flipped_area_fraction": a})
-        disp = (stages["flexicubes_finish"][0] - v_fc).norm(dim=1) * px_per_unit
-        metrics["flexicubes_finish"].update({"displacement_max_px": float(disp.max()),
-                                             "displacement_mean_px": float(disp.mean())})
+    if fin_name in ("flexicubes_finish", "flexicubes_largesteps"):
+        n, a = fs.flipped_faces(v_fc, stages[fin_name][0], f_fc)
+        metrics[fin_name].update({"flipped_faces": n, "flipped_faces_fraction": n / len(f_fc),
+                                  "flipped_area_fraction": a, **finish_info})
+        disp = (stages[fin_name][0] - v_fc).norm(dim=1) * px_per_unit
+        metrics[fin_name].update({"displacement_max_px": float(disp.max()),
+                                  "displacement_mean_px": float(disp.mean())})
     if fin_name is not None and band_img is not None:
         # the inside of the silhouette must be the FlexiCubes surface exactly: distance of the frozen
         # FlexiCubes vertices (band weight 0) to the finished surface
@@ -1249,7 +1511,8 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
 
     if blender:
         render_dir = out / "renders"
-        names = [n for n in ("input", "carved", "flexicubes", "flexicubes_finish", "flexicubes_remesh")
+        names = [n for n in ("input", "carved", "flexicubes", "flexicubes_finish", "flexicubes_remesh",
+                             "flexicubes_largesteps")
                  if (out / f"{n}.glb").exists()]
         if fs.BLENDER.exists():
             cmd = [str(fs.BLENDER), "-b", "-P", str(ROOT / "tools/debug/render_glb_views.py"), "--",
@@ -1301,15 +1564,33 @@ def main():
     parser.add_argument("--lr", type=float, default=None, help="SDF step in voxels")
     parser.add_argument("--smooth-iters", type=int, default=None)
     parser.add_argument("--max-grow", type=float, default=None, help="cap on added material, voxels")
-    parser.add_argument("--finish", choices=("remesh", "vertex", "none"), default="remesh",
-                        help="finishing pass: continuous remeshing (default), former in-plane vertex "
-                             "displacements, or none")
+    parser.add_argument("--finish", choices=("largesteps", "remesh", "vertex", "none"), default="largesteps",
+                        help="finishing pass: Large Steps on the fixed connectivity with a normal-"
+                             "consistency term (default since campaign v3c), continuous remeshing "
+                             "(v3, v3b), former in-plane vertex displacements, or none")
     parser.add_argument("--no-finish", action="store_true", help="same as --finish none")
     parser.add_argument("--finish-cap-px", type=float, default=None,
                         help="displacement cap of the finishing pass (default 8 remesh, 3 vertex)")
     parser.add_argument("--finish-levels", default=None,
                         help="default '512:2:120' (remesh), '512:2:60' (vertex)")
     parser.add_argument("--finish-w-flip", type=float, default=None)
+    parser.add_argument("--finish-lambda", type=float, default=None,
+                        help="largesteps: diffusion time of (I + lambda L) (default %g)" % LargeStepsConfig.lam)
+    parser.add_argument("--finish-direction", choices=("normal", "plane"), default=None,
+                        help="largesteps: along the in-plane part of the start normal (default) or free "
+                             "in the image plane")
+    parser.add_argument("--finish-w-normal", type=float, default=None,
+                        help="largesteps: weight of the normal-consistency term (default %g)"
+                             % LargeStepsConfig.w_normal)
+    parser.add_argument("--finish-normal-plain-mean", action="store_true",
+                        help="largesteps: normal term as a plain mean over face pairs (first v3c runs), "
+                             "not weighted by face area")
+    parser.add_argument("--finish-no-taper", action="store_true",
+                        help="largesteps: free vertices not scaled by the band weight (Dirichlet fall-off only)")
+    parser.add_argument("--finish-lr", type=float, default=None, help="finishing step, pixels")
+    parser.add_argument("--finish-early-stop", type=float, default=None,
+                        help="largesteps: stop when the loss gains less than this fraction over 20 "
+                             "iterations (default 0 = off)")
     parser.add_argument("--finish-contour-px", type=float, default=ContourBand.band_px,
                         help="the finishing pass moves and remeshes only the vertices projected within this "
                              "many pixels of the silhouette or target boundary (default %(default)s); "
@@ -1376,6 +1657,26 @@ def main():
                 finish.levels = levels(args.finish_levels)
             if args.finish_cap_px is not None:
                 finish.max_disp_px = args.finish_cap_px
+        elif kind == "largesteps":
+            finish = LargeStepsConfig()
+            if args.finish_levels:
+                finish.levels = levels(args.finish_levels)
+            if args.finish_cap_px is not None:
+                finish.max_disp_px = args.finish_cap_px
+            if args.finish_lambda is not None:
+                finish.lam = args.finish_lambda
+            if args.finish_direction is not None:
+                finish.direction = args.finish_direction
+            if args.finish_w_normal is not None:
+                finish.w_normal = args.finish_w_normal
+            if args.finish_lr is not None:
+                finish.lr_px = args.finish_lr
+            if args.finish_no_taper:
+                finish.taper = False
+            if args.finish_normal_plain_mean:
+                finish.normal_area_weight = False
+            if args.finish_early_stop is not None:
+                finish.early_stop = args.finish_early_stop
         elif kind == "vertex":
             finish = fs.FitConfig(device=device, deform_levels=levels(args.finish_levels or "512:2:60"),
                                   max_disp_px=(args.finish_cap_px if args.finish_cap_px is not None

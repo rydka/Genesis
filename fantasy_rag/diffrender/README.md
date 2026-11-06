@@ -591,6 +591,86 @@ toutes les variantes. **Enseignement** : ces ondulations viennent du pas de la f
 lui-même (gradient de silhouette sur une seule vue, remaillage) et non d'un débordement vers
 l'intérieur ; la bande garantit l'intérieur mais ne les corrige pas.
 
+### Finition plus douce du contour : Large Steps et cohérence des normales (2026-11-07, v3c)
+
+Demande : rapprocher le contour de la cible **sans** les froissements de la v3b (mèche gauche du front
+et joue de 1464, crête près du pouce et base de la lame de la main au couteau). Sans finition, le
+visage est propre mais l'IoU de 1464 tombe de 0,975 à 0,956.
+
+**Sources et transposition.**
+- Nicolet, Jacobson, Jakob 2021, « Large Steps in Inverse Rendering of Geometry », ACM TOG 40(6), DOI
+  10.1145/3478513.3480501 (texte lu). *Établi par l'article* : les gradients de silhouette sont
+  « sparse and can be very large » et concentrés sur les sommets du contour ; les suivre emmêle le
+  maillage ; un régularisateur laplacien n'échange l'information qu'avec le 1-voisinage à chaque pas
+  (« Jacobi-like », convergence lente) ; le pas préconditionné x ← x − η (I + λL)⁻² ∂Φ/∂x (paramétrage
+  u = (I + λL) x, laplacien combinatoire) diffuse chaque pas sur tout le maillage ; UniformAdam
+  (dénominateur unique, le plus grand second moment) parce que l'Adam composante par composante
+  « disturb[s] the smoothness ». λ = 19 pour la plupart des formes, λ = 99 pour leur expérience
+  mono-vue d'une sphère (Fig. 6). *Transposition (non établie par l'article)* : une seule vue, une
+  bande de contour étroite et un intérieur figé (condition de Dirichlet : les voisins figés comptent
+  dans le degré, le déplacement y est nul), pas de remaillage. La version de `remesh_finish` (moyenne
+  locale des voisins répétée 16 fois) est exactement la diffusion locale que l'article critique.
+  Implémentation maison (`largesteps_finish`, factorisation `scipy.sparse.linalg.factorized`) : les
+  paquets `largesteps` et `cholespy` (BSD-3, proposés « OUI » dans `LICENSES.md` sur une autre
+  branche) ne sont ni installés ni importés.
+- Liu, Chen, Li, Li 2019, « Soft Rasterizer », arXiv 1901.05567 (résumé et recherche lus, pas
+  l'article entier) : une « flattening loss » sur l'angle entre faces voisines, ajoutée au laplacien,
+  « further smooth[s] the surface and prevent[s] self-intersections » dans la reconstruction par
+  silhouette. *Transposition* : rendue relative (écart au cosinus de départ, pour garder le détail de
+  FlexiCubes), sur les seules paires qui touchent un sommet libre.
+
+**Changement.** `--finish largesteps` (`LargeStepsConfig`, défaut désormais) : déplacement
+x − x0 = W P (I + 19 L_ff)⁻¹ u sur les sommets libres de la bande, W le poids bande × régions, P la
+partie dans le plan image de la normale de départ lissée sur 8 anneaux (un scalaire par sommet, pas de
+glissement tangentiel) ou le plan image (`--finish-direction plane`) ; UniformAdam sur u ; plafond
+8 px ; terme de normales `--finish-w-normal` (10). Connectivité FlexiCubes inchangée. `--finish remesh`
+reste disponible (v3, v3b).
+
+**Résultats** (`data/bench/2026-11-07_fit-v3c/<stem>/<variante>/`, SDF, caméra et mesh FlexiCubes de
+la v3b réutilisés ; 150 itérations en 512 ; IoU contre le masque affiné ; « retournées » = faces dont
+la normale a tourné de plus de 90° ; `wn` = terme de normales en moyenne simple, `wa` = pondéré par
+l'aire ; quelques variantes de 1464 ont tourné sur CPU pendant qu'un autre agent tenait le GPU) :
+
+| Variante | 1464 IoU / tête / bord | retournées | normales opposées | 3dfab IoU | retournées |
+|---|---|---|---|---|---|
+| FlexiCubes, sans finition | 0,9560 / 0,884 / 0,541 | — | 0,091 % | 0,9365 | — |
+| `remesh` (v3b) | 0,9752 / 0,957 / 0,681 | 94 | 0,113 % | 0,9464 | 69 |
+| Large Steps λ 19, normale | 0,9742 / 0,955 / 0,670 | 159 | 0,165 % | 0,9443 | 35 |
+| Large Steps λ 99, normale | 0,9720 / 0,949 / 0,649 | 127 | 0,142 % | | |
+| Large Steps λ 19, plan | 0,9748 / 0,956 / 0,676 | 23 | 0,140 % | 0,9455 | 16 |
+| + `wn` 0,3 | 0,9672 / 0,925 / 0,609 | 2 | 0,096 % | 0,9368 (bloqué) | 1 |
+| + `wa` 1 | 0,9718 / 0,948 / 0,651 | 18 | 0,102 % | 0,9436 | 1 |
+| + `wa` 3 | 0,9701 / 0,937 / 0,634 | 7 | 0,097 % | 0,9431 | 0 |
+| **+ `wa` 10 (défaut)** | **0,9658 / 0,915 / 0,597** | **1** | **0,094 %** | **0,9419** | **0** |
+| + `wa` 30 | 0,9628 / 0,902 / 0,575 | 0 | 0,093 % | 0,9393 | 0 |
+| plan + `wa` 10 | 0,9741 / 0,955 / 0,668 | 0 | 0,107 % | | |
+| `wa` 10 sans rampe W | 0,9636 | 2 | 0,093 % | | |
+| `wa` 10, bande 16 px | 0,9637 | 2 | 0,093 % | | |
+
+Relance du défaut sans option (`default/`) : 0,9651 sur 1464, 0,9419 sur 3dfab (non-déterminisme du
+GPU). Intérieur figé exactement dans toutes (`frozen_max_dev_px` = 0,0). Finition 8 à 13 s sur GPU
+(contre 15 à 22 s pour `remesh`), dont 1 à 2 s de factorisation (15 000 à 26 000 sommets libres) ; pic de VRAM 0,64 Gio (1464) et
+0,46 Gio (3dfab). Sur CPU (4 fils), 2,5 s par itération.
+
+Contrôle visuel (zooms de la v3, lignes `input`, `v3_flexicubes`, `v3b_contour` et variantes ;
+planches intermédiaires `batch*_*.png`) :
+- Large Steps **seul** (λ 19 ou 99, normale ou plan) froisse la mèche et la crête du pouce autant que
+  `remesh`, et creuse un pli de la joue vers l'œil : le remaillage n'était pas la cause principale.
+- Le terme de normales efface le froissement. En moyenne simple, il ne bougeait presque plus rien
+  sur 3dfab : le gradient du terme sur les faces minuscules de FlexiCubes atteint 100 fois sa
+  médiane (mesuré : p50 0,0012 contre max 0,25 sur 1464) et fixe à lui seul le dénominateur
+  d'UniformAdam. Pondéré par l'aire, il agit pareil sur les deux images.
+- `wa` 10 (défaut) : mèche lisse, main au couteau et crête du pouce comme FlexiCubes, visage et mains
+  en trois-quarts propres ; main tendue et tête de 3dfab conservées. **Reste** un pli léger sur la joue
+  de 1464, au bord du profil, moins marqué que dans la v3b. Ni la suppression de la rampe W, ni une
+  bande de 16 px ne le retirent.
+- `plan + wa 10` garde l'IoU de `remesh` (0,974, aucune face retournée) mais la mèche reste striée.
+
+**Conclusion.** Il faut choisir entre l'IoU et la propreté du contour : chaque variante qui dépasse
+0,97 sur 1464 froisse la mèche. Le défaut retenu privilégie la propreté (IoU 0,965, au-dessus de
+0,956 sans finition). Pistes non essayées : plafond plus bas que 8 px ; direction normale avec un
+poids qui croît avec la courbure de départ.
+
 ## Prochaines étapes
 
 - Une extension CUDA n'est **pas nécessaire** pour l'instant : la version PyTorch fait 88 ms par

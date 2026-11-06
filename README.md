@@ -106,11 +106,16 @@ masque affiné `birefnet-general_refined.png` (défaut `--target refined` ; `--m
 brut, ce qui retire aussi ce que l'affinage avait comblé et sur quoi le générateur a modelé (la main
 tendue de 3dfab en v2).
 
-La finition (`--finish remesh` par défaut, `vertex`, ou `none`) ne touche que le **contour** : seuls
-les sommets qui se projettent à moins de `--finish-contour-px` (8 px par défaut, atténuation lisse sur
-les 4 derniers, `--finish-contour-transition-px`) du bord de la silhouette FlexiCubes ou de la cible
-bougent ou sont remaillés ; l'intérieur de la silhouette (visage, mains vues de face, plis) reste
+La finition (`--finish largesteps` par défaut depuis la campagne v3c, `remesh` pour les campagnes v3
+et v3b, `vertex`, ou `none`) ne touche que le **contour** : seuls les sommets qui se projettent à moins
+de `--finish-contour-px` (8 px par défaut, atténuation lisse sur les 4 derniers,
+`--finish-contour-transition-px`) du bord de la silhouette FlexiCubes ou de la cible bougent (ou sont
+remaillés avec `remesh`) ; l'intérieur de la silhouette (visage, mains vues de face, plis) reste
 exactement celui de FlexiCubes. `--finish-contour-px 0` rend l'ancien comportement (campagne v3).
+`largesteps` garde la connectivité FlexiCubes, préconditionne le pas par (I + 19 L)⁻¹ (Nicolet et al.
+2021, implémentation maison avec scipy, sans dépendance nouvelle) et ajoute un terme sur la variation
+de l'angle entre faces voisines (`--finish-w-normal`, 10 par défaut) : il évite les froissements du
+contour de `remesh`, au prix d'une partie du gain d'IoU (voir `docs/experiments.md`).
 
 ```powershell
 .venv\Scripts\python.exe tools\bench\fit_flexicubes.py --mesh M.glb --mask data\bg_comparison\<stem>\birefnet-general_raw.png --camera data\bench\<date>_fit-silhouette\<stem>\camera.json --out data\bench\<date>_fit-v3\<stem> --device cuda --blender

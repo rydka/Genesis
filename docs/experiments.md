@@ -114,6 +114,18 @@ référence (`1464…`, `3dfab…`), caméra orthographique recalée sur le masq
   **Enseignement** : le défaut est le pas de la finition sur le contour même, pas une fuite vers
   l'intérieur ; ne pas réessayer de réduire la bande pour le corriger.
 
+- **Finition plus douce du contour** (2026-11-07 v3c, `data/bench/2026-11-07_fit-v3c/`, détails dans
+  `fantasy_rag/diffrender/README.md`). Finition « Large Steps » (Nicolet, Jacobson, Jakob 2021) à
+  connectivité fixe, sans remaillage. **Seule, elle froisse autant que le remaillage**, quels que soient
+  λ (19, 99) et la direction (normale ou plan image). C'est un terme de cohérence des normales,
+  relatif au maillage de départ et pondéré par l'aire des faces, qui supprime le froissement. Défaut
+  retenu (poids 10) : mèche, main au couteau et vues trois-quarts presque aussi propres que FlexiCubes,
+  IoU 0,965 sur 1464 (0,956 sans finition, 0,975 avec `remesh`) et 0,942 sur 3dfab (0,937 / 0,946),
+  0 à 2 faces retournées (69 à 94 avec `remesh`). **Reste** un pli léger sur la joue de 1464, au bord
+  du profil. **Enseignements** : (1) le gain d'IoU et la propreté du contour s'opposent directement ;
+  aucune variante n'a les deux ; (2) sans pondération par l'aire, les faces minuscules de FlexiCubes
+  dominent le dénominateur d'UniformAdam et brident le pas de tout le maillage (3dfab ne bougeait plus).
+
 ## Pistes non explorées
 
 - Détourage guidé (boîte ou points, par exemple SAM 2) pour garder les accessoires, ou birefnet en plus
