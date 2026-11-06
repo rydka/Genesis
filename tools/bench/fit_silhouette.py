@@ -47,6 +47,7 @@ if str(ROOT) not in sys.path:
 from fantasy_rag.diffrender import (  # noqa: E402
     edge_gradients, face_normals, rasterize, vertex_normals,
 )
+from tools.bench.gpu_lock import choose_device  # noqa: E402
 
 try:
     from scipy import ndimage
@@ -263,10 +264,20 @@ class FitConfig:
     direction: str = "free"
     w_sdf: float = 0.5
     w_l2: float = 1.0
-    # mean ||L d||^2 with d in units of the target height; tuned on meshes of 0.2 to 0.6 M vertices
-    # (it grows roughly with the square of the vertex count for the same smoothness)
-    w_lap: float = 2e5
+    # Laplacian term mean ||L d||^2 / l^2, d and the mean edge length l in units of the target
+    # height: dividing by l^2 makes the weight independent of the mesh density. 2.0 here behaves
+    # like the former unnormalised weights 2e5 on the 0.4 to 1.3 M face meshes and 2e3 on the
+    # 1 k vertex test sphere (l^2 x former weight = 1.2, 8.2 and 2.9).
+    w_lap: float = 2.0
+    lap_normalize: bool = True          # False: former unnormalised mean ||L d||^2
     w_anchor: float = 2.0               # ||d||^2
+    # Cap on the displacement, in pixels of the full target (smooth: |d| -> cap tanh(|d| / cap));
+    # None = no cap. Used for the finishing pass after FlexiCubes (small corrections only).
+    max_disp_px: Optional[float] = None
+    # Flipped faces: mean over faces of relu(flip_cos - cos(n0, n))^2, n0 / n the initial / current
+    # unit face normals; 0 disables. flip_cos = 0 penalises only faces turned by more than 90 deg.
+    w_flip: float = 0.0
+    flip_cos: float = 0.0
     head_fraction: float = 0.2          # top band of the target bbox used as "head" zone
     edge_band_px: float = 4.0           # band around the target boundary for the edge IoU
     log_every: int = 10
@@ -346,6 +357,20 @@ def fit_camera(verts, faces, alpha_full, sdf_full, cfg: FitConfig, history: Opti
 # Phase 2: deformation
 # --------------------------------------------------------------------------------------------------
 
+def mean_edge_length(verts: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
+    """Mean length of the (directed, so each interior edge twice) face edges, in mesh units."""
+    e = torch.cat([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    return (verts[e[:, 0]] - verts[e[:, 1]]).norm(dim=1).mean()
+
+
+def flipped_faces(v_old: torch.Tensor, v_new: torch.Tensor, faces: torch.Tensor) -> Tuple[int, float]:
+    """(number, area fraction) of faces whose normal turned by more than 90 degrees."""
+    n_old = face_normals(v_old, faces)
+    flip = (n_old * face_normals(v_new, faces)).sum(1) < 0
+    area = face_normals(v_old, faces, normalize=False).norm(dim=1)
+    return int(flip.sum()), float(area[flip].sum() / area.sum().clamp(min=1e-20))
+
+
 def adjacency(faces: torch.Tensor, n: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """Row-normalised neighbour averaging A [V, V] (sparse CSR) and the degree [V]."""
     e = torch.cat([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
@@ -414,12 +439,24 @@ def deform(verts, faces, alpha_full, sdf_full, cam: OrthoCamera, cfg: FitConfig,
         raise ValueError(f"unknown direction {cfg.direction!r}")
     opt = UniformAdam([u])
     t0 = time.perf_counter()
+    mean_edge_h = float(mean_edge_length(verts, faces)) * float(scale)   # in units of the height H
+    lap_norm = mean_edge_h ** 2 if cfg.lap_normalize else 1.0
+    n0 = face_normals(q0, faces).detach() if cfg.w_flip > 0 else None
+    cap = cfg.max_disp_px / (float(scale) * H) if cfg.max_disp_px else None   # in mesh units
+    log(f"  mean edge {mean_edge_h * H:.2f} px; Laplacian weight {cfg.w_lap:g}"
+        + (f" / l^2 = {cfg.w_lap / lap_norm:.3g}" if cfg.lap_normalize else " (unnormalised)")
+        + (f"; cap {cfg.max_disp_px:g} px" if cap else "")
+        + (f"; flip penalty {cfg.w_flip:g} (cos < {cfg.flip_cos:g})" if n0 is not None else ""))
 
     def displacement():
         d = u
         for _ in range(cfg.smooth_iters):
             d = 0.5 * (d + avg @ d)
-        return d * basis if basis is not None else d
+        d = d * basis if basis is not None else d
+        if cap is not None:
+            norm = d.norm(dim=1, keepdim=True).clamp(min=1e-12)
+            d = d * (cap * torch.tanh(norm / cap) / norm)
+        return d
 
     for long_side, ss, iters in cfg.deform_levels:
         hw = level_size((H, W), long_side)
@@ -437,16 +474,24 @@ def deform(verts, faces, alpha_full, sdf_full, cam: OrthoCamera, cfg: FitConfig,
             lap = d_h - avg @ d_h
             l_lap = (lap ** 2).sum(1).mean()
             l_anchor = (d_h ** 2).sum(1).mean()
-            loss = cfg.w_sdf * l_sdf + cfg.w_l2 * l_l2 + cfg.w_lap * l_lap + cfg.w_anchor * l_anchor
+            loss = (cfg.w_sdf * l_sdf + cfg.w_l2 * l_l2 + cfg.w_lap / lap_norm * l_lap
+                    + cfg.w_anchor * l_anchor)
+            l_flip = torch.zeros(())
+            if n0 is not None:
+                cos = (face_normals(q, faces) * n0).sum(1)
+                l_flip = (torch.relu(cfg.flip_cos - cos) ** 2).mean()
+                loss = loss + cfg.w_flip * l_flip
             loss.backward()
             opt.step()
             if history is not None:
                 history.append({"phase": "deform", "level": long_side, "iter": it,
                                 "loss": float(loss), "sdf": float(l_sdf), "l2": float(l_l2),
-                                "lap": float(l_lap), "anchor": float(l_anchor)})
+                                "lap": float(l_lap), "anchor": float(l_anchor),
+                                "flip": float(l_flip)})
             if it % cfg.log_every == 0 or it == iters - 1:
                 log(f"  deform {long_side}x{ss} it {it:3d}: loss {float(loss):.5f} "
                     f"l2 {float(l_l2):.5f} sdf {float(l_sdf):.5f} lap {float(l_lap):.2e} "
+                    f"flip {float(l_flip):.2e} "
                     f"max|d| {float(d_h.norm(dim=1).max()) * H:.1f} px "
                     f"({time.perf_counter() - t0:.0f} s)")
             if time_budget_s and time.perf_counter() - t0 > time_budget_s:
@@ -702,7 +747,13 @@ def main():
     parser.add_argument("--mask", type=Path, required=True, help="RGBA PNG (alpha) or greyscale mask")
     parser.add_argument("--image", type=Path, default=None, help="source image, for the plate only")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="cpu",
+                        help="cpu, cuda or auto; cuda/auto take the GPU lock of the main repository "
+                             "and fall back to the CPU when another job holds it")
+    parser.add_argument("--gpu-lock", type=Path, default=None,
+                        help="lock file (default: <main repository>/data/.gpu-lock)")
+    parser.add_argument("--take-stale-lock", action="store_true",
+                        help="take over a lock whose PID no longer runs (check it first)")
     parser.add_argument("--blender", action="store_true", help="render before/after with Blender")
     parser.add_argument("--force", action="store_true", help="redo even if outputs exist")
     parser.add_argument("--time-budget", type=float, default=None,
@@ -714,6 +765,12 @@ def main():
     parser.add_argument("--lr", type=float, default=None, help="deformation step in pixels")
     parser.add_argument("--smooth-iters", type=int, default=None)
     parser.add_argument("--direction", choices=["free", "normal"], default=None)
+    parser.add_argument("--max-disp-px", type=float, default=None,
+                        help="cap on the vertex displacement, in pixels of the target")
+    parser.add_argument("--w-flip", type=float, default=None, help="flipped-face penalty weight")
+    parser.add_argument("--flip-cos", type=float, default=None)
+    parser.add_argument("--lap-unnormalized", action="store_true",
+                        help="former Laplacian term (weight depends on the mesh density)")
     args = parser.parse_args()
 
     cfg = FitConfig(device=args.device)
@@ -730,10 +787,24 @@ def main():
         cfg.smooth_iters = args.smooth_iters
     if args.lr is not None:
         cfg.deform_lr_px = args.lr
-    if cfg.device.startswith("cuda") and (ROOT / "data/.gpu-lock").exists():
-        print("data/.gpu-lock exists: refusing to use the GPU (rule gpu-et-environnement)")
-        sys.exit(2)
-    run(args.mesh, args.mask, args.out, args.image, cfg, args.blender, args.force, args.time_budget)
+    if args.max_disp_px is not None:
+        cfg.max_disp_px = args.max_disp_px
+    if args.w_flip is not None:
+        cfg.w_flip = args.w_flip
+    if args.flip_cos is not None:
+        cfg.flip_cos = args.flip_cos
+    if args.lap_unnormalized:
+        cfg.lap_normalize = False
+    # The lock of the main repository, even from a worktree; held CPU fallback, released at the end
+    cfg.device, lock = choose_device(args.device, "fit_silhouette",
+                                     f"silhouette fit of {args.mesh.name} -> {args.out}", args.gpu_lock,
+                                     take_stale=args.take_stale_lock)
+    try:
+        run(args.mesh, args.mask, args.out, args.image, cfg, args.blender, args.force,
+            args.time_budget)
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 if __name__ == "__main__":

@@ -61,9 +61,10 @@ def test_deformation_fits_a_different_shape(scene):
     verts, faces, target, cam_true = scene
     hw = target.shape
     sdf = fit.signed_distance(target > 0.5)
-    # Coarse sphere (1k vertices): the Laplacian weight depends on the mesh density
-    cfg = fit.FitConfig(deform_levels=((64, 2, 40), (128, 2, 60)), log_every=1000,
-                        w_lap=2e3, smooth_iters=8)
+    # Coarse sphere (1k vertices) with the default Laplacian weight: normalised by the mean edge
+    # length, the same weight works here and on the 0.4 to 1.3 M face meshes
+    cfg = fit.FitConfig(deform_levels=((64, 2, 40), (128, 2, 60)), log_every=1000, smooth_iters=8,
+                        w_flip=1.0)
     # Camera fixed (true pose); the sphere has to become the ellipsoid's silhouette
     cam = cam_true
     iou_cam = fit.iou(fit.hard_silhouette(verts, faces, cam, hw, hw), target > 0.5)
@@ -75,5 +76,28 @@ def test_deformation_fits_a_different_shape(scene):
     # Depth along the view axis is unchanged by construction
     rot = fit.CameraParams(cam).rot().detach()
     assert torch.allclose((new_verts @ rot.T)[:, 2], (verts @ rot.T)[:, 2], atol=1e-5)
-    flipped = ((fit.face_normals(verts, faces) * fit.face_normals(new_verts, faces)).sum(1) < 0)
-    assert int(flipped.sum()) < 0.02 * faces.shape[0]
+    flipped, _ = fit.flipped_faces(verts, new_verts, faces)
+    assert flipped < 0.02 * faces.shape[0]
+
+
+def test_displacement_cap(scene):
+    verts, faces, target, cam = scene
+    hw = target.shape
+    sdf = fit.signed_distance(target > 0.5)
+    cfg = fit.FitConfig(deform_levels=((64, 2, 30), (128, 2, 30)), log_every=1000, smooth_iters=8,
+                        max_disp_px=2.0)
+    new_verts = fit.deform(verts, faces, target, sdf, cam, cfg, log=lambda *_: None)
+    disp_px = (new_verts - verts).norm(dim=1) * cam.scale * hw[0]
+    assert float(disp_px.max()) <= 2.0 + 1e-4
+    iou_cam = fit.iou(fit.hard_silhouette(verts, faces, cam, hw, hw), target > 0.5)
+    iou_after = fit.iou(fit.hard_silhouette(new_verts, faces, cam, hw, hw), target > 0.5)
+    assert iou_after > iou_cam                    # still a correction, only a bounded one
+
+
+def test_mean_edge_length_and_flipped_faces():
+    v = torch.tensor([[0.0, 0, 0], [1, 0, 0], [0, 1, 0]])
+    f = torch.tensor([[0, 1, 2]])
+    assert abs(float(fit.mean_edge_length(v, f)) - (2 + 2 ** 0.5) / 3) < 1e-6
+    mirrored = v * torch.tensor([1.0, -1.0, 1.0])
+    assert fit.flipped_faces(v, mirrored, f) == (1, 1.0)
+    assert fit.flipped_faces(v, v * 2, f)[0] == 0
