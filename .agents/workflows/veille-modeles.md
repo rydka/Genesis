@@ -10,7 +10,8 @@ n'intègres rien.
    vers 3D). Sources : dépôts officiels, fiches HuggingFace, articles.
 3. Élimine d'emblée ce qui est non commercial ou exclut l'UE. Pour le reste, une fiche par candidat :
    - licence déclarée du code et des poids, et dépendances téléchargées repérées ;
-   - VRAM et temps annoncés, faisabilité sur 16 Go (sinon GPU cloud) ;
+   - VRAM et temps annoncés, faisabilité sur 16 Go (le GPU cloud est exclu pour l'instant : un candidat
+     qui ne tient pas est classé « hors budget », avec les réglages qui pourraient le faire tenir) ;
    - entrées et sorties (image unique ou multi-vues, mesh ou gaussiennes, texture) ;
    - réponse attendue aux défauts connus (accessoires fins, petites têtes, effets semi-transparents) ;
    - maturité : date, activité du dépôt, qualité de la documentation.

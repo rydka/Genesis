@@ -30,7 +30,10 @@ Deux agents qui chargent des modèles en même temps saturent les 16 Go et ralen
   de charger le générateur.
 - Le chargement à froid du générateur actuel prend environ 4 min ; une génération environ 3 min 20.
   Regrouper les générations dans un seul processus qui charge le modèle une fois.
-- Les modèles qui demandent plus de 16 Go (Direct3D-S2 en 1024, fine-tuning) passent par un GPU cloud.
+- **Pas de GPU cloud pour l'instant** (décision de l'utilisateur, 2026-11-06). Tout doit tenir sur 16 Go :
+  un modèle qui ne tient pas (Direct3D-S2 en 1024, par exemple) est écarté ou réduit (résolution plus
+  basse, découpage en zones), et un fine-tuning qui ne tient pas est seulement préparé, pas lancé.
+  Revenir vers l'utilisateur avant tout recours au cloud.
 
 ## Longues tâches
 
