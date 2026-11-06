@@ -4,8 +4,9 @@ Usage (from the repository root):
     .venv\\Scripts\\python.exe tools/bench/bench_diffrender.py --device cpu --faces 1000000 --res 512
     .venv\\Scripts\\python.exe tools/bench/bench_diffrender.py --device cuda --faces 1000000 --res 512
 
-A GPU run must respect data/.gpu-lock (rule gpu-et-environnement): the script refuses to start on
-CUDA while the lock exists. Nothing is written to disk; results are printed.
+A GPU run must respect the lock data/.gpu-lock of the main repository (rule gpu-et-environnement;
+see tools/bench/gpu_lock.py, also from a worktree): the script takes it on CUDA, releases it at the
+end, and refuses to start while another live process holds it. Nothing else is written to disk.
 
 Scene: a UV sphere with about --faces faces filling most of the image, i.e. a dense mesh with
 sub-pixel triangles as produced by the image-to-3D generators. Measured:
@@ -31,6 +32,7 @@ from fantasy_rag.diffrender import (  # noqa: E402
     Camera, antialias, edge_gradients, interpolate, look_at, perspective, rasterize, uv_sphere,
     vertex_normals,
 )
+from tools.bench.gpu_lock import GpuLock  # noqa: E402
 
 
 def _sync(device):
@@ -58,23 +60,27 @@ def main():
     parser.add_argument("--max-fragments", type=int, default=1 << 22)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--mode", choices=["analytic", "micro_edge"], default="analytic")
+    parser.add_argument("--gpu-lock", type=Path, default=None,
+                        help="lock file (default: <main repository>/data/.gpu-lock)")
+    parser.add_argument("--take-stale-lock", action="store_true",
+                        help="take over a lock whose PID no longer runs (check it first)")
     args = parser.parse_args()
 
     device = torch.device(args.device)
     if device.type != "cuda":
         run(args, device)
         return
-    lock = ROOT / "data" / ".gpu-lock"
-    if lock.exists():
-        sys.exit(f"{lock} exists: another GPU job is running, retry later")
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text(f"agent: bench_diffrender\npid: {os.getpid()}\n"
-                    f"start: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"task: diffrender benchmark {args.faces} faces {args.res}px\n", encoding="utf-8")
+    # Always the lock of the main repository, even when run from a worktree. A GPU benchmark that
+    # silently ran on the CPU would be mislabelled, so this tool refuses instead of falling back.
+    lock = GpuLock("bench_diffrender", f"diffrender benchmark {args.faces} faces {args.res}px",
+                   args.gpu_lock, args.take_stale_lock)
+    if not lock.acquire():
+        sys.exit(f"{lock.path} held ({lock.describe_holder()}): another GPU job is running, "
+                 "retry later")
     try:
         run(args, device)
     finally:
-        lock.unlink(missing_ok=True)
+        lock.release()
 
 
 def run(args, device):
