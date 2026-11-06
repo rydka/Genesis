@@ -304,6 +304,32 @@ erreur relative du gradient par cas et par mode contre la référence sur-échan
 échecs documentés), lame fine retrouvée en × 4 et effondrement en × 1 ; les mini-optimisations
 existantes tournent dans les deux modes.
 
+## Application : recalage par la silhouette
+
+`tools/bench/fit_silhouette.py` recale un mesh existant sur le masque de son image source (phase 1
+de `docs/conception/optimisation-par-zones.md`) et écrit sous `data/bench/` le mesh recalé, une
+planche avant/après, la courbe de perte, `summary.json` et, avec `--blender`, les rendus des deux
+meshes.
+
+1. **Caméra seule** : orthographique (w = 1), échelle, translation 2D, petite rotation, au-dessus
+   d'une orientation de face choisie parmi six (±X, ±Y, ±Z) par recouvrement après 30 itérations.
+   Pyramide 128 → 256 → 512 (grand côté).
+2. **Déformation, caméra figée** : déplacements des sommets **dans le plan de l'image seulement**
+   (la profondeur de chaque sommet ne change pas), paramétrés par d = Sᵏ u (S : moyenne avec les
+   voisins, k = 30), descente de type Adam à dénominateur uniforme (comme Large Steps, sans la
+   dépendance), terme laplacien ‖L d‖² et rappel ‖d‖². Pyramide 256 × 2 → 512 × 2 (rendu
+   sur-échantillonné 2 × 2).
+3. **Pertes** : longue portée Σ α · φ, où φ est la distance signée au bord du masque cible (son
+   minimum est atteint pour α = cible, et la force sur un bord est proportionnelle à son écart), plus
+   L2 sur la silhouette ; gradients par `edge_gradients`.
+
+Premiers résultats (2026-11-06, CPU, deux meshes Hunyuan3D-2.1 de référence, usage interne) : IoU
+0,889 → 0,993 et 0,914 → 0,996 ; 0,4 à 0,8 million de faces, 5 et 14 minutes. La silhouette est
+retrouvée, mais les grandes corrections (une excroissance à faire disparaître, un tissu à amincir)
+se font en écrasant la surface dans le plan : 1 à 1,4 % de faces retournées et des plis visibles sous
+d'autres angles. Une correction de ce type demande un changement de topologie (FlexiCubes) plutôt
+qu'un déplacement de sommets.
+
 ## Prochaines étapes
 
 - Une extension CUDA n'est **pas nécessaire** pour l'instant : la version PyTorch fait 88 ms par
