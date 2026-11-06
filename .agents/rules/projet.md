@@ -34,3 +34,16 @@ Le fine-tuning de modèles est envisagé.
 - Lancer `python -m pytest tests/ -q` avant toute PR et rapporter le résultat tel quel.
 - Rapporter les résultats honnêtement : un test raté, une étape sautée ou une conclusion incertaine se
   disent explicitement.
+
+## Quand un problème résiste
+
+Le projet est un projet de recherche : face à un problème technique qui résiste (artefacts, méthode qui
+ne converge pas, résultat contre-intuitif), **c'est à l'agent de juger** s'il a besoin de consulter la
+littérature (arXiv, actes de conférences, documentation des méthodes) avant de proposer une hypothèse ou
+une correction. Quand il s'appuie sur des articles :
+- les citer (auteurs, titre, année, lien) dans le rapport et, si la méthode est retenue, dans la
+  documentation du code ;
+- distinguer ce que l'article établit de ce qui n'est qu'une transposition à notre cas, à vérifier par un
+  test ;
+- vérifier la licence de tout code associé avant de l'utiliser (règle `licences`) ; une idée publiée se
+  réimplémente librement, un code non commercial ne se copie pas.
