@@ -55,7 +55,11 @@ needs a representation that changes topology (docs/conception/optimisation-par-z
      fantasy_rag/diffrender/remeshing), restricted to the error regions. Leung et al. 2022 (CVPR
      workshop L3D-IVU, "Black-Box Test-Time Shape REFINEment") found that silhouette-only refinement
      degenerates without displacement and smoothness regularisers. --finish vertex: the former
-     fit_silhouette displacements (fixed connectivity, cap 3 px, flipped-face penalty);
+     fit_silhouette displacements (fixed connectivity, cap 3 px, flipped-face penalty).
+     Since campaign v3b both are further restricted to a contour band (ContourBand): only the
+     vertices projected within --finish-contour-px (8) of the boundary of the FlexiCubes silhouette or
+     of the target move or get remeshed, with a smooth fall-off; the inside of the silhouette stays the
+     FlexiCubes surface exactly (measure frozen_max_dev_px). --finish-contour-px 0: former behaviour;
   6. measures for input / FlexiCubes / FlexiCubes + finishing: IoU (global, head, edge band),
      flipped faces (finishing), normals opposed to the input's, chamfer distance to the input split
      into zones (visible, hidden, silhouette band), times; plate, Blender renders and a sheet that
@@ -64,7 +68,7 @@ needs a representation that changes topology (docs/conception/optimisation-par-z
 Usage (from the repository root; outputs go under data/, never in git):
     .venv\\Scripts\\python.exe tools/bench/fit_flexicubes.py --mesh M.glb --mask RAW_ALPHA.png
         [--refined-mask REFINED.png] [--target refined|raw] [--carve detached|regions|none]
-        [--finish remesh|vertex|none] [--all-errors] [--image SOURCE.jpg]
+        [--finish remesh|vertex|none] [--finish-contour-px 8] [--all-errors] [--image SOURCE.jpg]
         [--camera data/bench/<date>_fit-silhouette/<stem>/camera.json]
         --out data/bench/<date>_fit-flexicubes/<stem> [--device cpu|cuda|auto] [--res 128] [--blender]
 
@@ -646,6 +650,48 @@ class RemeshConfig:
     log_every: int = 10
 
 
+@dataclass
+class ContourBand:
+    """Finishing pass restricted to the contour (campaign v3b): only the vertices whose projection lies
+    within `band_px` of the boundary of the start silhouette (the FlexiCubes mesh) or of the target may
+    move or be remeshed; the weight is 1 up to band_px - transition_px and falls smoothly (smoothstep)
+    to 0 at band_px. Everything else, the inside of the silhouette (faces, hands seen from the front,
+    cloth folds), stays exactly the FlexiCubes surface: those vertices are frozen and no edge touching
+    them is collapsed. In campaign v3 the finishing pass also moved vertices seen from the front inside
+    the error regions (gradient smoothing, Laplacian of the displacement field, remeshing) and rippled
+    the strand and cheek of 1464 and the knife hand of 3dfab.
+    Default 8 px: the displacement cap of the finishing pass and the region transition of the
+    error regions; a contour vertex can move by the full cap while the vertices behind it, up to
+    4 px (1.5 voxels on 1464, 2 on 3dfab), follow it entirely. band_px = 0: no band (former behaviour,
+    the whole error regions for the remeshing pass, the whole mesh for the vertex pass)."""
+    band_px: float = 8.0
+    transition_px: float = 4.0
+
+
+def contour_band_weight(sil: np.ndarray, target: np.ndarray, band: ContourBand) -> Optional[np.ndarray]:
+    """[H, W] weight of the contour band (ContourBand): smoothstep of the distance in pixels to the
+    nearest boundary of `sil` or `target` (both bool). None when band.band_px <= 0."""
+    if band.band_px <= 0:
+        return None
+    d = np.minimum(np.abs(fs.signed_distance(sil)), np.abs(fs.signed_distance(target)))
+    t = min(max(band.transition_px, 1e-6), band.band_px)
+    x = np.clip((band.band_px - d) / t, 0, 1)
+    return (x * x * (3 - 2 * x)).astype(np.float32)
+
+
+def vertex_weight(verts: torch.Tensor, cam: fs.OrthoCamera, *imgs: Optional[np.ndarray]
+                  ) -> Optional[torch.Tensor]:
+    """Product of the images (None = 1) sampled at the projection of the vertices; None if all are None."""
+    imgs = [im for im in imgs if im is not None]
+    if not imgs:
+        return None
+    uv, _ = project_px(verts.detach().cpu(), cam)
+    w = np.ones(verts.shape[0], np.float32)
+    for im in imgs:
+        w *= sample_image(im, uv, outside=0.0)
+    return torch.from_numpy(w).float().to(verts.device)
+
+
 def _neighbour_mean(x: torch.Tensor, e2: torch.Tensor, deg: torch.Tensor) -> torch.Tensor:
     return torch.zeros_like(x).index_add_(0, e2[:, 0], x[e2[:, 1]]) / deg[:, None]
 
@@ -653,10 +699,14 @@ def _neighbour_mean(x: torch.Tensor, e2: torch.Tensor, deg: torch.Tensor) -> tor
 def remesh_finish(verts: torch.Tensor, faces: torch.Tensor, alpha_full: np.ndarray,
                   sdf_full: np.ndarray, cam: fs.OrthoCamera, zscale: float, cfg: RemeshConfig,
                   weight_img: Optional[np.ndarray], history: List[dict], log,
-                  time_budget_s: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+                  time_budget_s: Optional[float] = None, band_img: Optional[np.ndarray] = None
+                  ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
     """Optimise the vertices of (verts, faces) against the silhouette, remeshing at every iteration.
 
     Silhouette losses weighted per pixel by `weight_img` (the error regions, None = 1 everywhere).
+    `band_img` (contour_band_weight, None = no band) multiplies the weight of the vertices only, not
+    the losses: with it the vertices of weight below `min_weight` are frozen exactly (weight set to 0,
+    no collapse of an edge that touches them).
     Steps: in-plane, along the in-plane part of the vertex normal, smoothed over the neighbours,
     Adam with a uniform denominator (largest second moment over the mesh, as UniformAdam), scaled by
     the region weight of each vertex; Laplacian regularisation of the displacement field; displacement
@@ -675,11 +725,11 @@ def remesh_finish(verts: torch.Tensor, faces: torch.Tensor, alpha_full: np.ndarr
         p = fs.CameraParams(cam).to(device)
         rot, scale, center = p.rot(), p.log_scale.exp(), p.center.clone()
         view = rot[2] / rot[2].norm()                  # camera axis in mesh coordinates
-    if weight_img is not None:
-        uv, _ = project_px(verts.cpu(), cam)
-        w0 = torch.from_numpy(sample_image(weight_img, uv, outside=0.0)).float().to(device)
-    else:
+    w0 = vertex_weight(verts, cam, weight_img, band_img)
+    if w0 is None:
         w0 = torch.ones(verts.shape[0], device=device)
+    if band_img is not None:
+        w0 = torch.where(w0 > cfg.min_weight, w0, torch.zeros_like(w0))
     l0 = float(fs.mean_edge_length(verts, faces))
     px = float(scale) * H                              # pixels per mesh unit
     cap = cfg.max_disp_px / px
@@ -697,7 +747,8 @@ def remesh_finish(verts: torch.Tensor, faces: torch.Tensor, alpha_full: np.ndarr
                          torch.zeros_like(etc[:, 0]))
         mx = torch.where(free, torch.full_like(etc[:, 0], l0 * (1 + cfg.edge_len_tol)),
                          torch.full_like(etc[:, 0], float("inf")))
-        return remesh(etc, f, mn, mx, flip=True, max_vertices=4e6, flip_mask_column=WC)
+        return remesh(etc, f, mn, mx, flip=True, max_vertices=4e6, flip_mask_column=WC,
+                      collapse_mask_column=WC if band_img is not None else None)
 
     log(f"  remesh finish: {verts.shape[0]} vertices, {faces.shape[0]} faces, mean edge "
         f"{l0 * px:.2f} px, cap {cfg.max_disp_px:g} px, {int((w0 > cfg.min_weight).sum())} free vertices")
@@ -946,11 +997,13 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         finish_cfg, camera_json: Optional[Path] = None, blender: bool = False,
         force: bool = False, time_budget_s: Optional[float] = None,
         finish_budget_s: Optional[float] = None, n_samples: int = 300_000,
-        other_mask: Optional[Tuple[str, Path]] = None) -> dict:
+        other_mask: Optional[Tuple[str, Path]] = None, contour: Optional[ContourBand] = None) -> dict:
     """`mask_path`: the target (the mask the mesh was generated from: the refined one for the
     Hunyuan3D meshes); `other_mask` (name, path): a second mask the silhouettes are also measured
     against (the raw alpha), for comparison only. `finish_cfg`: RemeshConfig (continuous remeshing,
-    default), fs.FitConfig (former vertex displacements) or None."""
+    default), fs.FitConfig (former vertex displacements) or None. `contour`: band of the finishing pass
+    (ContourBand, None = the default band; band_px = 0 = former behaviour)."""
+    contour = ContourBand() if contour is None else contour
     out.mkdir(parents=True, exist_ok=True)
     summary_path = out / "summary.json"
     log_file = open(out / "fit.log", "a", encoding="utf-8")
@@ -1060,8 +1113,18 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         zone_info["vertices_changed_over_half_voxel"] = int((ds > 0.5).sum())
     stages["flexicubes"] = (v_fc, f_fc)
 
-    # Finishing pass (cached)
+    # Finishing pass (cached), restricted to the contour band
     finish_info = {}
+    band_img = None
+    if finish_cfg is not None:
+        sil_fc = fs.hard_silhouette(v_fc, f_fc, cam, (H, W), (H, W))
+        band_img = contour_band_weight(sil_fc, target, contour)
+        if band_img is not None:
+            Image.fromarray((band_img * 255).astype(np.uint8)).save(out / "contour_band.png")
+            log(f"contour band: {contour.band_px:g} px (transition {contour.transition_px:g} px), "
+                f"{int((band_img > 0).sum())} px")
+        else:
+            log("contour band: none (former behaviour)")
     if isinstance(finish_cfg, RemeshConfig):
         fin_name = "flexicubes_remesh"
         fin_glb = out / f"{fin_name}.glb"
@@ -1073,7 +1136,7 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
             log("finishing pass (continuous remeshing)")
             v_fin, f_fin, finish_info = remesh_finish(
                 v_fc.to(device), f_fc.to(device), alpha_full, sdf_full, cam, zscale, finish_cfg,
-                regions.w_opt if regions is not None else None, history, log, finish_budget_s)
+                regions.w_opt if regions is not None else None, history, log, finish_budget_s, band_img)
             v_fin, f_fin = v_fin.cpu(), f_fin.cpu()
             fs.export_glb(v_fin.numpy(), f_fin.numpy(), fin_glb)
             timings["finish_s"] = round(time.perf_counter() - t0, 1)
@@ -1088,7 +1151,8 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         else:
             log("finishing pass (fit_silhouette deformation, capped)")
             v_fin = fs.deform(v_fc.to(device), f_fc.to(device), alpha_full, sdf_full, cam, finish_cfg,
-                              history, log, finish_budget_s).cpu()
+                              history, log, finish_budget_s,
+                              vertex_weight(v_fc.to(device), cam, band_img)).cpu()
             fs.export_glb(v_fin.numpy(), f_fc.numpy(), fin_glb)
             timings["finish_s"] = round(time.perf_counter() - t0, 1)
         stages[fin_name] = (v_fin, f_fc)
@@ -1122,6 +1186,15 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         disp = (stages["flexicubes_finish"][0] - v_fc).norm(dim=1) * px_per_unit
         metrics["flexicubes_finish"].update({"displacement_max_px": float(disp.max()),
                                              "displacement_mean_px": float(disp.mean())})
+    if fin_name is not None and band_img is not None:
+        # the inside of the silhouette must be the FlexiCubes surface exactly: distance of the frozen
+        # FlexiCubes vertices (band weight 0) to the finished surface
+        frozen = (vertex_weight(v_fc, cam, band_img) <= 0).numpy()
+        v_fin, f_fin = stages[fin_name]
+        dev = SurfaceQuery(v_fin.numpy(), f_fin.numpy()).distance(v_fc.numpy()[frozen]) * px_per_unit
+        metrics[fin_name].update({"frozen_vertices": int(frozen.sum()),
+                                  "frozen_fraction": float(frozen.mean()),
+                                  "frozen_max_dev_px": float(dev.max()) if dev.size else 0.0})
     ref_q = SurfaceQuery(v_np, f_np)
     ref_n = face_normals(verts, faces).numpy()
     band_meas = cfg.band_px + 2 * zone_info["voxel_px"]
@@ -1162,6 +1235,7 @@ def run(mesh_path: Path, mask_path: Path, out: Path, image_path: Optional[Path],
         "other_mask": {"name": other_mask[0], "path": str(other_mask[1])} if other_mask else None,
         "mask_size_wh": [W, H], "target_islands": island_info, "config": asdict(cfg),
         "finish": fin_name, "finish_config": asdict(finish_cfg) if finish_cfg is not None else None,
+        "finish_contour": asdict(contour),
         "camera": cam.to_dict(), "grid": grid.to_dict(), "sdf": sdf_info, "zones": zone_info,
         "sparse": {"cubes": sparse.n_cubes, "vertices": int(sparse.verts.shape[0]),
                    "active": int(active_idx.numel())},
@@ -1236,6 +1310,12 @@ def main():
     parser.add_argument("--finish-levels", default=None,
                         help="default '512:2:120' (remesh), '512:2:60' (vertex)")
     parser.add_argument("--finish-w-flip", type=float, default=None)
+    parser.add_argument("--finish-contour-px", type=float, default=ContourBand.band_px,
+                        help="the finishing pass moves and remeshes only the vertices projected within this "
+                             "many pixels of the silhouette or target boundary (default %(default)s); "
+                             "0 = no band, former behaviour (campaign v3)")
+    parser.add_argument("--finish-contour-transition-px", type=float, default=ContourBand.transition_px,
+                        help="smooth fall-off at the edge of the band (default %(default)s)")
     parser.add_argument("--time-budget", type=float, default=None, help="FlexiCubes, seconds")
     parser.add_argument("--finish-budget", type=float, default=None, help="finishing, seconds")
     parser.add_argument("--samples", type=int, default=300_000, help="points per mesh (chamfer)")
@@ -1303,7 +1383,8 @@ def main():
             if args.finish_w_flip is not None:
                 finish.w_flip = args.finish_w_flip
         run(args.mesh, mask, args.out, args.image, cfg, finish, args.camera, args.blender,
-            args.force, args.time_budget, args.finish_budget, args.samples, other)
+            args.force, args.time_budget, args.finish_budget, args.samples, other,
+            ContourBand(args.finish_contour_px, args.finish_contour_transition_px))
     finally:
         if lock is not None:
             lock.release()

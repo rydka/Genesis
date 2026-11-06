@@ -554,6 +554,43 @@ Contrôle visuel (zooms 2048 et 3072 px, lignes `input`, `v2`, `v3_*`) :
 Sur CPU (4 fils), une itération coûte environ 1 s en 128, 3 à 5 s en 256 et 8 à 10 s en 384 :
 compter 10 à 25 min par mesh en 256 ; sur GPU 0,2 à 1 s.
 
+### Finition limitée au contour (2026-11-07, v3b)
+
+Demande : la finition dégradait le détail fin (ondulations sur la mèche et la joue de 1464, crête près
+du pouce et base de la lame froissée sur la main au couteau). Changement (`ContourBand`, défaut) : seuls
+les sommets qui se projettent à moins de `--finish-contour-px` = **8 px** du bord de la silhouette
+FlexiCubes ou de la cible bougent ou sont remaillés (poids 1 jusqu'à 4 px, smoothstep vers 0 à 8 px,
+`--finish-contour-transition-px`). 8 px = plafond de déplacement de la finition et transition des
+régions d'erreur : un sommet du contour peut parcourir tout le plafond et ceux juste derrière le
+suivent. Les autres sont figés exactement : poids mis à 0, et `remesh()` reçoit un nouvel argument
+`collapse_mask_column` qui interdit l'effondrement d'une arête touchant un sommet figé (un effondrement
+déplace ses deux extrémités ; sans lui, un sommet figé pouvait bouger, voir `tests/test_remeshing.py`).
+Même bande pour `--finish vertex` (`fit_silhouette.deform(vertex_weight=...)`).
+`--finish-contour-px 0` rend le comportement v3. Mesure ajoutée : `frozen_max_dev_px`, distance des
+sommets FlexiCubes figés à la surface finale.
+
+Résultats (`data/bench/2026-11-07_fit-v3b/`, SDF, caméra et mesh FlexiCubes de la v3 réutilisés) :
+
+| | 1464 v3 → v3b | 3dfab v3 → v3b |
+|---|---|---|
+| IoU affiné / brut après finition | 0,9752 / 0,9656 → 0,9752 / 0,9656 | 0,9465 / 0,9296 → 0,9464 / 0,9294 |
+| Chamfer visible / caché (px) | 0,106 / 0,067 → 0,103 / 0,066 | 0,212 / 0,174 → 0,207 / 0,173 |
+| Normales opposées (aire) | 0,108 % → 0,113 % | 0,282 % → 0,280 % |
+| Faces retournées (aire) | 74 (0,012 %) → 94 (0,013 %) | 66 (0,013 %) → 69 (0,013 %) |
+| Sommets figés, écart max | — → 81 %, 0,0 px | — → 80 %, 0,0 px |
+| Finition, pic de VRAM | 19 s, 0,73 Gio → 22 s, 0,66 Gio | 12 s, 0,52 Gio → 15 s, 0,47 Gio |
+
+Contrôle visuel (mêmes recadrages que la v3) : **l'intérieur est identique à FlexiCubes** (écart
+0,0 px), mais **les défauts signalés ne sont pas réglés** : la mèche, la joue près du profil et la
+main au couteau sont *sur* le contour, à moins de 8 px du bord, et la v3 n'y touchait déjà presque
+que là (pixels modifiés par rapport à FlexiCubes sur la vue de face : 1,47 % en v3, 1,43 % en v3b, aux
+mêmes endroits). Bandes plus étroites (`_variants/band4`, `band2`) : IoU 0,975 puis 0,974 sur 1464,
+et c'est pire à l'œil, car le même déplacement se concentre sur moins de sommets : une marche nette
+apparaît au bord de la bande sur la mèche et à la base de la lame. Main tendue de 3dfab gardée dans
+toutes les variantes. **Enseignement** : ces ondulations viennent du pas de la finition sur le contour
+lui-même (gradient de silhouette sur une seule vue, remaillage) et non d'un débordement vers
+l'intérieur ; la bande garantit l'intérieur mais ne les corrige pas.
+
 ## Prochaines étapes
 
 - Une extension CUDA n'est **pas nécessaire** pour l'instant : la version PyTorch fait 88 ms par

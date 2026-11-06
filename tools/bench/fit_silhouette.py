@@ -411,9 +411,11 @@ class UniformAdam(torch.optim.Optimizer):
 
 
 def deform(verts, faces, alpha_full, sdf_full, cam: OrthoCamera, cfg: FitConfig,
-           history: Optional[list] = None, log=print, time_budget_s: Optional[float] = None
-           ) -> torch.Tensor:
-    """In-plane vertex displacements against the silhouette, camera frozen. Returns new vertices."""
+           history: Optional[list] = None, log=print, time_budget_s: Optional[float] = None,
+           vertex_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """In-plane vertex displacements against the silhouette, camera frozen. Returns new vertices.
+    `vertex_weight` [V] in [0, 1] (None = 1): scales the displacement of each vertex; the vertices of
+    weight 0 are returned unchanged (tools/bench/fit_flexicubes.py, contour band of the finishing pass)."""
     device = verts.device
     H, W = alpha_full.shape
     n = verts.shape[0]
@@ -456,6 +458,8 @@ def deform(verts, faces, alpha_full, sdf_full, cam: OrthoCamera, cfg: FitConfig,
         if cap is not None:
             norm = d.norm(dim=1, keepdim=True).clamp(min=1e-12)
             d = d * (cap * torch.tanh(norm / cap) / norm)
+        if vertex_weight is not None:
+            d = d * vertex_weight[:, None]
         return d
 
     for long_side, ss, iters in cfg.deform_levels:
@@ -503,7 +507,10 @@ def deform(verts, faces, alpha_full, sdf_full, cam: OrthoCamera, cfg: FitConfig,
     with torch.no_grad():
         d = displacement()
         q = torch.cat([q0[:, :2] + d, q0[:, 2:]], dim=1)
-        return q @ rot                                   # back to mesh coordinates (rot orthonormal)
+        out = q @ rot                                    # back to mesh coordinates (rot orthonormal)
+        if vertex_weight is not None:                    # frozen vertices: bit-exact, no rounding
+            out = torch.where((vertex_weight > 0)[:, None], out, verts)
+        return out
 
 
 # --------------------------------------------------------------------------------------------------

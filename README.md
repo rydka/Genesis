@@ -106,6 +106,12 @@ masque affiné `birefnet-general_refined.png` (défaut `--target refined` ; `--m
 brut, ce qui retire aussi ce que l'affinage avait comblé et sur quoi le générateur a modelé (la main
 tendue de 3dfab en v2).
 
+La finition (`--finish remesh` par défaut, `vertex`, ou `none`) ne touche que le **contour** : seuls
+les sommets qui se projettent à moins de `--finish-contour-px` (8 px par défaut, atténuation lisse sur
+les 4 derniers, `--finish-contour-transition-px`) du bord de la silhouette FlexiCubes ou de la cible
+bougent ou sont remaillés ; l'intérieur de la silhouette (visage, mains vues de face, plis) reste
+exactement celui de FlexiCubes. `--finish-contour-px 0` rend l'ancien comportement (campagne v3).
+
 ```powershell
 .venv\Scripts\python.exe tools\bench\fit_flexicubes.py --mesh M.glb --mask data\bg_comparison\<stem>\birefnet-general_raw.png --camera data\bench\<date>_fit-silhouette\<stem>\camera.json --out data\bench\<date>_fit-v3\<stem> --device cuda --blender
 ```

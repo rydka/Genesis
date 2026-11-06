@@ -1,7 +1,8 @@
 # Copyright (c) 2022 Profactor GmbH. MIT License, see LICENSE in this folder.
 # From https://github.com/Profactor/continuous-remeshing, commit 2e556421a6096701519c4f106d4af1f0588e19dd
 # (core/opt.py). Modified for Genesis (see README.md in this folder): torch_scatter.scatter_mean replaced by index_add_
-# and a neighbour count; relative import of .remesh; optional flip_mask_column argument of remesh().
+# and a neighbour count; relative import of .remesh; optional flip_mask_column and collapse_mask_column arguments
+# of remesh().
 
 from copy import deepcopy
 import time
@@ -17,6 +18,7 @@ def remesh(
         flip:bool,
         max_vertices=1e6,
         flip_mask_column:int=None, #Genesis: flips only where vertices_etc[:,column]>0
+        collapse_mask_column:int=None, #Genesis: collapses only of edges whose 2 vertices have vertices_etc[:,column]>0
         ):
 
     # dummies
@@ -34,6 +36,8 @@ def remesh(
     face_collapse = calc_face_collapses(vertices,faces,edges,face_to_edge,edge_length,face_normals,vertex_normals,min_edgelen,area_ratio=0.5)
     shortness = (1 - edge_length / min_edgelen[edges].mean(dim=-1)).clamp_min_(0) #e[0,1] 0...ok, 1...edgelen=0
     priority = face_collapse.float() + shortness
+    if collapse_mask_column is not None: #Genesis: a collapse moves both end vertices, keep the others in place
+        priority[~(vertices_etc[:,collapse_mask_column]>0)[edges].all(dim=-1)] = 0
     vertices_etc,faces = collapse_edges(vertices_etc,faces,edges,priority)
 
     # split

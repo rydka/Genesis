@@ -19,7 +19,9 @@ DOI 10.1002/cav.2101.
     limitées à une zone) ;
   - `opt.py` : `torch_scatter.scatter_mean(..., out=neighbor_smooth)` devient `index_add_` puis une
     division par le nombre de voisins (`bincount`, au moins 1) ; import relatif `.remesh` ; argument
-    optionnel `flip_mask_column` de `remesh()`.
+    optionnels `flip_mask_column` et `collapse_mask_column` de `remesh()` (le second interdit
+    l'effondrement des arêtes dont une extrémité est figée : un effondrement déplace ses deux
+    sommets au milieu de l'arête).
 - **Dépendances** : `torch` seulement (`torch_scatter` n'est pas installé).
 - **Registre** : ligne « continuous-remeshing (Profactor) » de `LICENSES.md` (proposée OUI, PR #7, à
   faire valider par un humain). La ligne `torch_scatter` n'est plus nécessaire pour ce code.

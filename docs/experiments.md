@@ -105,6 +105,15 @@ référence (`1464…`, `3dfab…`), caméra orthographique recalée sur le masq
   en trop au milieu au lieu de la déplacer ; (3) plafonner l'ajout de matière à 1,5 voxel plutôt que 4
   évite une crête à côté de la main au couteau.
 
+- **Finition limitée au contour** (2026-11-07 v3b, `data/bench/2026-11-07_fit-v3b/`, détails dans
+  `fantasy_rag/diffrender/README.md`). Seuls les sommets à moins de 8 px du bord de la silhouette ou
+  de la cible bougent ou sont remaillés ; l'intérieur reste exactement celui de FlexiCubes (écart
+  mesuré 0,0 px, 80 % des sommets figés). Mesures quasi identiques à la v3. **Pas réglé** : ondulations
+  de la mèche et de la joue de 1464, crête près du pouce et base de la lame : elles sont sur le
+  contour, là où la v3 agissait déjà. Bandes de 4 et 2 px : pire (marche au bord de la bande).
+  **Enseignement** : le défaut est le pas de la finition sur le contour même, pas une fuite vers
+  l'intérieur ; ne pas réessayer de réduire la bande pour le corriger.
+
 ## Pistes non explorées
 
 - Détourage guidé (boîte ou points, par exemple SAM 2) pour garder les accessoires, ou birefnet en plus
