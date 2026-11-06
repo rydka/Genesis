@@ -44,10 +44,26 @@ Les boîtes se recouvrent d'une **marge** (par exemple 10 % de leur taille) pour
 |---|---|---|
 | 0. Préparation | Estimation des normales et de la profondeur de l'image (MoGe-2, sous réserve d'audit), puis libération de la mémoire du modèle. | Non |
 | 1. Passe globale | Caméra optimisée seule, puis forme grossière du corps entier (FlexiCubes, grille globale 192³, initialisée depuis le mesh nettoyé). Fixe le repère commun. | Non |
-| 2. Découpage | Masques 2D des zones sur l'image (SAM 2 guidé, détecteurs de mains et de visage, détection de l'arme par texte : outils en cours d'audit), reportés sur le mesh par projection ; les faces cachées héritent de l'étiquette la plus proche. Contrôle visuel du découpage avant de continuer. | Non |
+| 2. Découpage | Masques 2D des zones sur l'image, reportés sur le mesh par projection ; les faces cachées héritent de l'étiquette la plus proche. Contrôle visuel du découpage avant de continuer. Outils : voir « Découpage de l'image » ci-dessous. | Non |
 | 3. Raffinement local | Pour chaque boîte : grille locale initialisée depuis la SDF globale, image et caméra recadrées (même pose), tout le reste figé. Les pixels d'une boîte masqués par une autre zone sont exclus de sa perte (occlusion). | **Oui** |
 | 4. Fusion | Mélange des SDF locales dans la grille globale, avec des poids qui décroissent dans les marges de recouvrement (partition de l'unité), puis **une seule extraction** du mesh, donc sans couture. | Non |
 | 5. Cohérence | Quelques itérations globales courtes pour lisser les raccords. Optionnel : passe Large Steps sur la tête. | Non |
+
+## Découpage de l'image
+
+Choix validé par l'utilisateur le 2026-11-06, sur la base de l'audit de licences (tous Apache-2.0) :
+
+| Outil | Rôle |
+|---|---|
+| **MediaPipe** (Face Detector, Face Landmarker, Hand Landmarker) | Trouver la tête et les mains, et donner des points de repère du visage. |
+| **OWLv2** | Trouver l'arme à partir d'un texte (« sword », « spear »…). |
+| **SAM 2 / 2.1** | Produire le masque précis de chaque zone à partir des boîtes et des points fournis par les deux outils précédents. Utiliser les poids `safetensors`. |
+
+Écartés pour l'instant : SAM 3 (licence Meta à faire relire par un juriste), Grounding DINO (licence des
+poids seulement déclarée), Grounding DINO 1.5 / DINO-X (API payante, envoi d'images à un tiers).
+
+Point de qualité : MediaPipe Hands se déclare hors domaine « when the hand is holding objects ». Pour la
+main qui tient l'arme, la boîte d'OWLv2 sert de point de départ à SAM 2.
 
 ## Budget mémoire estimé (à mesurer)
 
@@ -74,7 +90,8 @@ calcul : le gain de temps vient surtout de grilles plus petites que la grille gl
 - **Découpage faux** : une erreur de masque devient une erreur de forme. D'où le contrôle visuel.
 - **Contacts mal regroupés** : main et arme séparées produisent des déformations opposées.
 - **Fusion** : marges trop étroites, et des raccords apparaissent ; trop larges, et le coût augmente.
-- **Licences** : MoGe-2 (données d'entraînement) et les outils de découpage sont en cours d'audit.
+- **Licences** : MoGe-2 et SAM 2 ont des poids sous licence permissive mais des données d'entraînement
+  sous conditions propres ; question posée au juriste.
 
 ## Expérience proposée au banc d'essai
 
