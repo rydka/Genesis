@@ -223,3 +223,5 @@ yarn-error.log*
 
 # Claude Code (réglages personnels ; .claude/settings.json reste partagé)
 .claude/settings.local.json
+# Copies de travail isolées des sous-agents Claude Code
+.claude/worktrees/
