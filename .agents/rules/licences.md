@@ -21,3 +21,10 @@ commercialisation. Cette règle prime sur toute autre considération (qualité, 
 5. **Images de test** (`data/`) : œuvres d'artistes tiers, évaluation interne uniquement. Jamais pour
    l'entraînement, une démo publique ou du marketing.
 6. Un agent peut proposer une ligne du registre ; seul un humain la valide (colonne « Validé par »).
+7. **Copyleft** (décision de l'utilisateur, 2026-11-06) :
+   - **GPL et AGPL : jamais importées** dans le processus Python du projet (ni `fantasy_rag`, ni `tools`, ni
+     un modèle tiers que nous chargeons). Elles ne sont admises que comme programmes externes lancés en
+     sous-processus (exemple : Blender), après une ligne au registre. Une dépendance GPL importée par un
+     modèle tiers (exemple : plyfile dans TRELLIS.2) doit être remplacée ou retirée.
+   - **LGPL : acceptée en import**, à condition de ne pas modifier la bibliothèque.
+   - **MPL-2.0** : acceptée sans modification des fichiers concernés.
