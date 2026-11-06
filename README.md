@@ -88,7 +88,9 @@ apps/streamlit/app.py     # Interface utilisateur
 tests/                    # Tests pytest
 tools/debug/              # Outils d'expérimentation (comparaison de détourage,
                           #   balayage d'hyperparamètres, rendu de GLB)
-tools/bench/              # Mesures (temps et mémoire du rasteriseur différentiable)
+tools/bench/              # Mesures (temps et mémoire du rasteriseur différentiable), recalage
+                          #   par la silhouette (fit_silhouette, fit_flexicubes), planches de
+                          #   zooms visage et mains (zoom_sheet)
 config/requirements/      # Dépendances (base, development, generation)
 ```
 

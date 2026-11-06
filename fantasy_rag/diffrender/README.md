@@ -419,6 +419,71 @@ abandonnée : elle troue la cape (une étoffe oblique n'a pas une épaisseur con
 Autre limite : l'extraction à 256 ou 384 lisse les détails plus fins qu'un voxel (mèches,
 visage) ; la finition ne les recrée pas.
 
+### Cible brute et régions d'erreur (2026-11-07)
+
+Retour de l'utilisateur sur la version du 2026-11-06 : la silhouette s'améliore mais **visage et
+mains sont déformés** (stries sur la mèche et le front, bosses sur le dessus des cheveux, pointes sur
+le pouce et la main au couteau). Deux corrections, actives par défaut :
+
+1. **Cible = alpha brut du détoureur** (`birefnet-general_raw.png`, `--mask`), et non plus le masque
+   affiné (`refine_mask`, conçu pour Hunyuan3D : il ferme les trous et épaissit les parties fines,
+   +1,7 % de pixels sur 1464, +4 % sur 3dfab). Traitement de l'alpha doux : cible binaire = α > 0,5
+   (mesures, régions, zones) ; α continu dans la perte L2 ; **distance au contour 0,5 sub-pixel**
+   (α suréchantillonné × 4 en bilinéaire : erreur moyenne 0,08 px contre 0,36 px au pixel sur un disque
+   anti-crénelé). Les îlots détachés de moins de 100 px sont retirés de la cible : l'alpha brut de 1464
+   garde les traits de crayon de la signature, autour desquels l'enveloppe laissait des miettes.
+   `--target refined` reprend l'ancien masque ; les IoU contre l'autre masque sont dans
+   `summary.json` (`vs_refined` ou `vs_raw`).
+2. **Ne corriger que les grosses erreurs** : écarts entre la silhouette de l'entrée et la cible, en
+   trop et en manque séparément ; ouverture morphologique d'un disque de 3 px (élimine les liserés
+   jusqu'à ~6 px de large), composantes d'au moins 300 px, puis retour aux pixels d'erreur autour des
+   noyaux gardés ; poids lissé de 1 sur la région à 0 à 8 px (`regions.png`). La **découpe** n'agit que
+   dans les régions en trop (ailleurs l'enveloppe est la cible plus la silhouette de l'entrée, élargie
+   d'une marge, mélange lisse dans la transition) ; l'**optimisation** n'active que les sommets des
+   régions, son changement est atténué par le poids et la perte de silhouette pondérée par pixel.
+   `--all-errors` rend l'ancien comportement.
+
+Résultats (`data/bench/2026-11-07_fit-flexicubes-v2/`, même caméra que le 2026-11-06 ; variantes
+dans `_variants/` : `raw_all` = masque brut seul, `refined_regions` = régions seules) :
+
+| IoU après finition (brut / affiné) | 1464 | 3dfab |
+|---|---|---|
+| entrée | 0,907 / 0,914 | 0,868 / 0,889 |
+| 2026-11-06 (affiné, toutes erreurs) | 0,979 / **0,992** | 0,951 / **0,977** |
+| **défaut** (brut + régions) | **0,984** / 0,974 | **0,955** / 0,940 |
+| brut seul | 0,993 / 0,979 | 0,978 / 0,946 |
+| régions seules | 0,971 / 0,980 | 0,944 / 0,968 |
+
+Défaut : Chamfer visible / caché 0,10 / 0,07 px (1464) et 0,18 / 0,17 px (3dfab) ; normales opposées
+0,66 % et 1,12 % (0,43 % et 0,75 % le 2026-11-06) ; 5 et 7 faces retournées par la finition (0
+avant) ; optimisation 65 s et 56 s (au lieu de 2 min 33 et 1 min 52 : 3 fois moins de sommets actifs),
+pic de VRAM 0,67 et 0,48 Gio.
+
+Contrôle visuel (zooms 2048 et 3072 px, `tools/bench/zoom_sheet.py`, `<stem>/zooms/`) :
+
+- **Mains de 1464 : réglé.** Main au couteau identique à l'entrée (plus d'excroissance), plus de
+  pointe sous le poing. Le pouce reste raccourci : il est dans une région en trop de 407 px.
+- **Signature de 1464 : retirée** de la silhouette, paroi de découpe nette (texture de voxels visible
+  de trois quarts) ; le moignon caché derrière la cape reste.
+- **Visage de 1464 : pas réglé.** Les stries du front et de la mèche sont dans toutes les variantes,
+  dès la découpe : le profil du visage du mesh dépasse celui de l'image de 26 px d'épaisseur
+  (2 455 px), une grosse erreur compacte que la découpe retire. Ce ne sont ni les marches de pixels
+  (le contour sub-pixel ne change rien) ni des vides entre couches (5 % des rayons de la région en
+  traversent plusieurs) : la paroi de découpe est presque parallèle à une surface elle-même tangente au
+  regard au bord de la silhouette, et leur intersection alterne bandes coupées et non coupées au gré
+  des ondulations des mèches. Les bosses du dessus des cheveux sont réduites mais pas supprimées : le
+  masque brut manque encore 700 et 470 px au sommet du crâne, et l'ajout de matière les crée.
+- **Main tendue de 3dfab : régression.** Dans l'image, du fond sépare la main (qui tient une carte) de
+  l'étoffe en dessous ; le masque affiné avait comblé ce vide et Hunyuan3D a modelé la main dans ce
+  pont. Contre le masque brut, la découpe retire le pont et la main avec, laissant des fragments
+  flottants (même chose avec le masque brut seul ; la variante régions seules garde la main). Tête et
+  poing de 3dfab : proches de l'entrée.
+- **Masque brut seul** (`raw_all`) : la main au couteau de 1464 garde un rebord froissé et creusé, les
+  bosses des cheveux restent : le masque brut seul ne fait pas disparaître les pointes, ce sont les
+  régions qui le font.
+- **Finition** : elle ne réintroduit pas de pointe visible sur les mains (une légère sur le pouce de
+  1464), mais retourne maintenant 5 à 7 faces.
+
 Sur CPU (4 fils), une itération coûte environ 1 s en 128, 3 à 5 s en 256 et 8 à 10 s en 384 :
 compter 10 à 25 min par mesh en 256 ; sur GPU 0,2 à 1 s.
 

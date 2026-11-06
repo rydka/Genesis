@@ -76,6 +76,16 @@ référence (`1464…`, `3dfab…`), caméra orthographique recalée sur le masq
   ne sont pas contraintes ; sur `3dfab…`, la matière manquante au-delà de 4 voxels (jambes coupées par
   le cadre, creux entre le bras et le corps) n'est pas recréée.
 
+- **Cible brute et régions d'erreur** (2026-11-07, `data/bench/2026-11-07_fit-flexicubes-v2/`, détails
+  dans `fantasy_rag/diffrender/README.md`) : cible = alpha brut de birefnet (contour sub-pixel, îlots
+  < 100 px retirés) et découpe et optimisation limitées aux écarts importants et compacts. Mains de
+  1464 réglées (plus de pointes ni d'excroissance), signature retirée ; **stries du visage non
+  réglées** (découpe rasante d'un profil qui dépasse de 26 px : une vraie grosse erreur, pas du bruit) ;
+  bosses des cheveux réduites seulement ; **main tendue de 3dfab coupée** : le mesh l'a modelée dans
+  un vide que le masque affiné avait comblé. **Enseignement** : le masque brut seul ne supprime pas les
+  pointes, les régions si ; mais quand le mesh a été généré depuis le masque affiné, le recaler sur le
+  masque brut retire aussi ce que la fermeture avait créé, parfois une main.
+
 ## Pistes non explorées
 
 - Détourage guidé (boîte ou points, par exemple SAM 2) pour garder les accessoires, ou birefnet en plus

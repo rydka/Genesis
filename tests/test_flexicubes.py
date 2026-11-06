@@ -91,7 +91,8 @@ def test_mesh_sdf_sign_next_to_a_hole():
 
 
 @needs_open3d
-def test_fit_removes_a_protrusion_outside_the_silhouette():
+@pytest.mark.parametrize("regions", [False, True])
+def test_fit_removes_a_protrusion_outside_the_silhouette(regions):
     fit = pytest.importorskip("tools.bench.fit_flexicubes")
     fs = fit.fs
     # Input: a sphere plus a lump behind it that sticks out sideways (like the signature on 1464).
@@ -109,14 +110,20 @@ def test_fit_removes_a_protrusion_outside_the_silhouette():
 
     cfg = fit.FlexiConfig(res=40, levels=((128, 2, 25),), log_every=1000)
     grid, s0, _ = fit.initial_sdf(verts.numpy(), faces.numpy(), cfg, None, log=lambda *_: None)
-    zones, info = fit.make_zones(grid, s0, cam, sdf_full, cfg)
+    reg = None
+    if regions:   # only the lump is a large error region: carving and optimisation act there only
+        cfg.region_open_px, cfg.region_min_area_px = 2.0, 40   # 96 px high image: smaller regions
+        reg = fit.error_regions(fs.hard_silhouette(verts, faces, cam, hw, hw), target, cfg)
+        assert reg.excess.sum() > 50 and not reg.missing.any()
+    zones, info = fit.make_zones(grid, s0, cam, sdf_full, cfg, reg)
     assert info["carved_inside_vertices"] > 0
     sparse = fit.build_sparse(grid, zones, "cpu")
     flat = sparse.vert_flat.numpy()
     s_ref = torch.from_numpy(zones.s_ref.reshape(-1)[flat])
     active = torch.from_numpy(np.nonzero(zones.active.reshape(-1)[flat])[0])
+    taper = torch.from_numpy(zones.taper.reshape(-1)[flat]) if regions else None
     s = fit.optimise(sparse, s_ref, active, alpha, sdf_full, cam, fs._zscale(verts), cfg, [],
-                     log=lambda *_: None)
+                     log=lambda *_: None, taper=taper, loss_weight=reg.w_opt if regions else None)
     v, f, _ = SparseFlexiCubes("cpu").extract(sparse, s)
 
     iou_in = fs.iou(fs.hard_silhouette(verts, faces, cam, hw, hw), target)
@@ -130,3 +137,39 @@ def test_fit_removes_a_protrusion_outside_the_silhouette():
     far_from_lump = (v - torch.tensor([0.62, 0.0, -0.35])).norm(dim=1) > 0.3
     err = (r[far_from_lump] - 0.6).abs()
     assert float(err.max()) < 0.75 * grid.h and float(err.mean()) < 0.15 * grid.h
+
+
+def test_subpixel_distance_of_an_antialiased_contour():
+    fit = pytest.importorskip("tools.bench.fit_flexicubes")
+    yy, xx = np.mgrid[0:80, 0:80] + 0.5
+    r = np.hypot(xx - 40.3, yy - 39.7)
+    alpha = np.clip(20.5 - r, 0, 1).astype(np.float32)        # anti-aliased disc of radius 20
+    near = np.abs(r - 20) < 6
+    err = {k: np.abs(fit.subpixel_signed_distance(alpha, k) - (r - 20))[near] for k in (1, 4)}
+    assert err[4].max() < 0.25 and err[4].mean() < 0.12
+    assert err[4].mean() < 0.5 * err[1].mean()                # the pixel contour is a staircase
+
+
+def test_error_regions_keep_a_lump_and_drop_thin_ribbons():
+    fit = pytest.importorskip("tools.bench.fit_flexicubes")
+    yy, xx = np.mgrid[0:120, 0:160]
+    target = np.hypot(xx - 70, yy - 60) < 40
+    sil = np.hypot(xx - 70, yy - 60) < 42                     # 2 px ribbon all around: noise
+    sil |= np.hypot(xx - 115, yy - 60) < 14                    # lump sticking out on the right
+    sil &= ~(np.hypot(xx - 70, yy - 22) < 3)                   # small notch at the top: noise
+    reg = fit.error_regions(sil, target, fit.FlexiConfig())
+    assert reg.excess[60, 120] and not reg.excess[60, 29]      # lump kept, ribbon on the left not
+    assert not reg.missing.any()
+    assert reg.w_cut[60, 120] == 1 and reg.w_cut[60, 29] == 0 and 0 < reg.w_cut[60, 104] < 1
+    assert len(reg.info["excess"]["kept"]) == 1
+
+
+def test_target_islands_are_dropped_without_touching_the_silhouette():
+    fit = pytest.importorskip("tools.bench.fit_flexicubes")
+    yy, xx = np.mgrid[0:100, 0:100]
+    alpha = (np.hypot(xx - 40, yy - 50) < 30).astype(np.float32)
+    alpha[20:23, 85:88] = 1.0                                   # pencil stroke: 9 px island
+    alpha[19, 85:88] = 0.3                                      # with a soft fringe
+    out, info = fit.drop_islands(alpha, 100)
+    assert info["islands_removed"] == 1 and out[18:24, 84:89].max() == 0
+    assert np.array_equal(out[:, :75], alpha[:, :75])          # main shape untouched
