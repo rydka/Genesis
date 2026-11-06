@@ -38,6 +38,12 @@ Références communes hors de ce dossier : `LICENSES.md`, `docs/experiments.md`,
 
 ## Compatibilité
 
+**Claude Code** lit `CLAUDE.md` à la racine, qui importe `AGENTS.md` et les trois règles. Les six rôles
+sont des sous-agents dans `.claude/agents/` : chacun est un fichier court qui renvoie à son workflow et
+à son skill de `.agents/`, avec des outils limités selon le rôle (par exemple, pas d'édition de code
+pour le banc d'essai). L'agent principal orchestre l'enchaînement, car un sous-agent ne peut pas en
+lancer un autre.
+
 **Codex** lit `AGENTS.md` à la racine du dépôt et détecte les skills de `.agents/skills/`. Il ne lit pas
 `rules/` ni `workflows/` de lui-même : `AGENTS.md` lui dit de lire les règles et, pour jouer un rôle,
 le fichier de workflow correspondant (« Gardien des licences : … »). Règles et workflows restent donc
