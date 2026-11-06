@@ -13,8 +13,11 @@ banc d'essai.
 - **nvdiffrast exclu.** **Kaolin écarté** : la 0.18 charge `kaolin.non_commercial` à chaque import et
   embarque deux en-têtes propriétaires dans son binaire (audit du 2026-11-06).
 - Briques retenues, sous réserve de validation dans `LICENSES.md` : **FlexiCubes autonome**
-  (`nv-tlabs/FlexiCubes`, Apache-2.0, pur PyTorch), **Mitsuba 3** (BSD-3) comme rendu différentiable,
-  **Large Steps** (BSD-3) pour le détail sans changement de topologie.
+  (`nv-tlabs/FlexiCubes`, Apache-2.0, pur PyTorch) et **Large Steps** (BSD-3) pour le détail sans
+  changement de topologie.
+- **Rasteriseur différentiable maison** (décision du 2026-11-06), à la place de Mitsuba 3 : un seul
+  composant, écrit et maîtrisé par nous, pour l'optimisation par l'image et pour la cuisson des textures
+  dans l'espace UV. Écrit à partir des articles, sans lire ni reprendre le code de nvdiffrast.
 
 ## Pourquoi des zones
 
@@ -52,7 +55,7 @@ Les boîtes se recouvrent d'une **marge** (par exemple 10 % de leur taille) pour
 |---|---|
 | Grille globale 192³ (paramètres et états de l'optimiseur), phases 1, 4, 5 | environ 2,7 Go |
 | 3 grilles locales 128³, phase 3, simultanées | environ 3 × 0,8 Go |
-| Rendus Mitsuba des recadrages (512²) | à mesurer |
+| Rendus des recadrages (512²) par le rasteriseur maison | à mesurer |
 | MoGe-2, phase 0 seulement | libéré avant la phase 1 |
 
 Le pic attendu reste nettement sous 16 Go. Sur un seul GPU, les 3 boîtes se partagent la puissance de
