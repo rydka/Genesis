@@ -38,6 +38,11 @@ Références communes hors de ce dossier : `LICENSES.md`, `docs/experiments.md`,
 
 ## Compatibilité
 
+**Codex** lit `AGENTS.md` à la racine du dépôt et détecte les skills de `.agents/skills/`. Il ne lit pas
+`rules/` ni `workflows/` de lui-même : `AGENTS.md` lui dit de lire les règles et, pour jouer un rôle,
+le fichier de workflow correspondant (« Gardien des licences : … »). Règles et workflows restent donc
+la source unique pour les deux outils.
+
 La documentation d'Antigravity utilise `.agents/` ; d'anciens guides et certains outils utilisent
 `.agent/`. Si les règles ou les workflows n'apparaissent pas dans Antigravity, vérifier le nom de dossier
 attendu par la version installée. Le format des règles (`trigger: always_on`) et des skills
